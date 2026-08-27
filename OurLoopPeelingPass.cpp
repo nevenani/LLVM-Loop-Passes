@@ -12,6 +12,8 @@
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
 #include <unordered_map>
 #include <vector>
@@ -74,15 +76,17 @@ struct OurLoopPeelingPass : public LoopPass {
                 Value *Var1 = VariablesMap.count(Op0) ? VariablesMap[Op0] : Op0;
                 Value *Var2 = VariablesMap.count(Op1) ? VariablesMap[Op1] : Op1;
 
-                if (Var1 == LoopCounter) {
-                    if (auto *CI = dyn_cast<ConstantInt>(Op1)) {
-                        return (unsigned)CI->getZExtValue();
-                    }
-                }
-
-                if (Var2 == LoopCounter) {
-                    if (auto *CI = dyn_cast<ConstantInt>(Op0)) {
-                        return (unsigned)CI->getZExtValue();
+                if (Var1 == LoopCounter || Var2 == LoopCounter) {
+                    ConstantInt *CI = dyn_cast<ConstantInt>(Var1 == LoopCounter ? Op1 : Op0);
+                    if (CI) {
+                        
+                        if (Cmp->getPredicate() == ICmpInst::ICMP_EQ) {
+                            return 1; 
+                        }
+                        
+                        if (Cmp->getPredicate() == ICmpInst::ICMP_SLT || Cmp->getPredicate() == ICmpInst::ICMP_SLE) {
+                            return (unsigned)CI->getZExtValue() + 1;
+                        }
                     }
                 }
             }
@@ -90,38 +94,14 @@ struct OurLoopPeelingPass : public LoopPass {
         return 0;
     }
 
-    BasicBlock *copyBasicBlock(BasicBlock *OriginalBlock) {
-        Instruction *Clone;
-        std::unordered_map<Value *, Value *> Mapping;
-        IRBuilder<> Builder(OriginalBlock);
 
-        BasicBlock *NewBlock = BasicBlock::Create(OriginalBlock->getContext(), "",
-        OriginalBlock->getParent(), LoopBasicBlocks.front());
-
-        Builder.SetInsertPoint(NewBlock);
-
-        for (Instruction &I : *OriginalBlock) {
-            Clone = I.clone();
-            Mapping[&I] = Clone;
-            Builder.Insert(Clone);
-
-            for (size_t i = 0; i < Clone->getNumOperands(); i++) {
-                if (Mapping[Clone->getOperand(i)]) {
-                Clone->setOperand(i, Mapping[Clone->getOperand(i)]);
-                }
-            }
-        }
-
-        return NewBlock;
-    }
-
-    BasicBlock *copyBasicBlockWithConstant(BasicBlock *OriginalBlock, Value *LoopCounterVar, int ConstantVal, BasicBlock *InsertBeforeBB) {
+    BasicBlock *copyBasicBlockWithConstant(BasicBlock *OriginalBlock, int ConstantVal, BasicBlock *InsertBeforeBB) {
         Instruction *Clone;
         std::unordered_map<Value *, Value *> Mapping;
         LLVMContext &Ctx = OriginalBlock->getContext();
-        IRBuilder<> Builder(OriginalBlock);
 
         BasicBlock *NewBlock = BasicBlock::Create(Ctx, "", OriginalBlock->getParent(), InsertBeforeBB);
+        IRBuilder<> Builder(NewBlock);
         Builder.SetInsertPoint(NewBlock);
 
         ConstantInt *CVal = ConstantInt::get(Type::getInt32Ty(Ctx), ConstantVal);
@@ -131,15 +111,14 @@ struct OurLoopPeelingPass : public LoopPass {
             if (auto *LI = dyn_cast<LoadInst>(&I)) {
                     Value *LoadedPtr = LI->getOperand(0);
                     
-                    if (LoadedPtr == LoopCounterVar || VariablesMap[LI] == LoopCounterVar) {
+                    if (LoadedPtr == LoopCounter || VariablesMap[LI] == LoopCounter) {
                         Mapping[&I] = CVal;
                         continue;
                     }
                 
             }
 
-            if (isa<ICmpInst>(&I)) {
-                Mapping[&I] = ConstantInt::getTrue(Ctx);
+            if (isa<ICmpInst>(&I) || isa<BranchInst>(&I)) {
                 continue;
             }
 
@@ -150,7 +129,7 @@ struct OurLoopPeelingPass : public LoopPass {
             for (size_t i = 0; i < Clone->getNumOperands(); i++) {
                 Value *Op = Clone->getOperand(i);
                 if (Mapping[Op]) {
-                Clone->setOperand(i, Mapping[Op]);
+                    Clone->setOperand(i, Mapping[Op]);
                 }
             }
         }
@@ -158,14 +137,11 @@ struct OurLoopPeelingPass : public LoopPass {
         return NewBlock;
     }
 
-
-
     void peeling(Loop *L) {
         BasicBlock *CompareBlock = findCompareBlock();
-
         unsigned PeelingCount = getPeelingCount();
 
-        if(PeelingCount == 0 || CompareBlock == nullptr)
+        if (PeelingCount == 0 || CompareBlock == nullptr || !LoopCounter)
             return;
 
         BasicBlock *Preheader = L->getLoopPreheader();
@@ -178,44 +154,30 @@ struct OurLoopPeelingPass : public LoopPass {
                 ThenBlock = BI->getSuccessor(0); 
             }
         }
-
         if (!ThenBlock) return;
-
-        BasicBlock *LastPredecessor = Preheader;
-        BasicBlock *FirstPeeled = nullptr;
 
         std::vector<BasicBlock *> PeeledBlocks;
 
+        
         for (unsigned i = 0; i < PeelingCount; ++i) {
-           
-            BasicBlock *PeeledThen = copyBasicBlockWithConstant(ThenBlock, LoopCounter, i, Header);
-
-            Instruction *OldTerm = PeeledThen->getTerminator();
-            if (OldTerm) {
-                OldTerm->eraseFromParent();
-            }
-
-            if (i == 0) {
-                FirstPeeled = PeeledThen; 
-            } else {
-                
-                Instruction *PrevTerm = LastPredecessor->getTerminator();
-                if (PrevTerm) PrevTerm->eraseFromParent();
-                BranchInst::Create(PeeledThen, LastPredecessor);
-            }
-
+            BasicBlock *PeeledThen = copyBasicBlockWithConstant(ThenBlock, i, Header);
             PeeledBlocks.push_back(PeeledThen);
-            LastPredecessor = PeeledThen;
         }
 
-        
+
         Instruction *PreheaderTerm = Preheader->getTerminator();
         if (PreheaderTerm) PreheaderTerm->eraseFromParent();
-        BranchInst::Create(FirstPeeled, Preheader);
+        BranchInst::Create(PeeledBlocks[0], Preheader);
 
-        
-        if (!PeeledBlocks.empty()) {
-            BranchInst::Create(Header, PeeledBlocks.back());
+ 
+        for (size_t i = 0; i < PeeledBlocks.size(); ++i) {
+            IRBuilder<> B(PeeledBlocks[i]);
+            if (i + 1 < PeeledBlocks.size()) {
+                B.CreateBr(PeeledBlocks[i + 1]);
+            } else {
+                B.CreateStore(ConstantInt::get(Type::getInt32Ty(Header->getContext()), PeelingCount), LoopCounter);
+                B.CreateBr(Header);
+            }
         }
 
     }

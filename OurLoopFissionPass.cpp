@@ -136,17 +136,43 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Bezbedna popravka PHI ulaza bez narušavanja SSA zavisnosti
+  // Bezbedna popravka PHI čvorova i uklanjanje degenerisanih PHI-jeva (sa 0 ili 1 ulazom)
   void fixPhisToMatchPreds(Function *F) {
-    for (BasicBlock &BB : *F) {
-      unordered_set<BasicBlock*> RealPreds(pred_begin(&BB), pred_end(&BB));
+    bool changed = true;
+    while (changed) {
+      changed = false;
 
-      for (Instruction &I : BB) {
-        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
-          for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
-            BasicBlock *IncBB = PN->getIncomingBlock(i);
-            if (RealPreds.find(IncBB) == RealPreds.end()) {
-              PN->removeIncomingValue(i, false);
+      for (BasicBlock &BB : *F) {
+        unordered_set<BasicBlock*> RealPreds(pred_begin(&BB), pred_end(&BB));
+
+        for (auto It = BB.begin(), E = BB.end(); It != E; ) {
+          Instruction &I = *It++;
+          if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+
+            // 1. Ukloni ulaze iz blokova koji više nisu pravi predhodnici
+            for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
+              BasicBlock *IncBB = PN->getIncomingBlock(i);
+              if (RealPreds.find(IncBB) == RealPreds.end()) {
+                PN->removeIncomingValue(i, false);
+              }
+            }
+
+            // 2. Ako PHI nema nijedan ulaz, zameni sa Undef i obriši
+            if (PN->getNumIncomingValues() == 0) {
+              PN->replaceAllUsesWith(UndefValue::get(PN->getType()));
+              PN->eraseFromParent();
+              changed = true;
+            }
+            // 3. Ako PHI ima tačno 1 ulaz, zameni ga tom vrednošću i obriši
+            else if (PN->getNumIncomingValues() == 1) {
+              Value *SingleVal = PN->getIncomingValue(0);
+              if (SingleVal != PN) { // Izbegavanje kružne zavisnosti
+                PN->replaceAllUsesWith(SingleVal);
+              } else {
+                PN->replaceAllUsesWith(UndefValue::get(PN->getType()));
+              }
+              PN->eraseFromParent();
+              changed = true;
             }
           }
         }
@@ -256,9 +282,15 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Uklanjamo samo višak nepostojećih predhodnika iz PHI čvorova
     Function *F = L->getHeader()->getParent();
+
+    // 1. Uklanjamo nedostižne/odsečene blokove nastale transformacijom
+    removeUnreachableBlocks(*F);
+
+    // 2. Usklađujemo PHI ulaze i eliminišemo PHI-jeve sa 0 ili 1 ulazom
     fixPhisToMatchPreds(F);
+
+    // 3. Još jedan prolaz za čišćenje blokova ako su PHI eliminacije oslobodile mrtve grane
     removeUnreachableBlocks(*F);
 
     return true;

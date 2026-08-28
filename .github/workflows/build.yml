@@ -1,0 +1,23 @@
+name: Build LLVM Pass
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Install LLVM and Clang
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y llvm-10 llvm-10-dev clang-10 cmake
+
+    - name: Build Project
+      run: |
+        mkdir build
+        cd build
+        cmake -DLLVM_DIR=/usr/lib/llvm-10/cmake ..
+        make

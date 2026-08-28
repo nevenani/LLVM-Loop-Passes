@@ -32,7 +32,6 @@ struct OurLoopFissionPass : public LoopPass {
     AU.setPreservesCFG();
   }
 
-  // Funkcija za proveru zavisnosti pre razdvajanja
   bool hasDependencies(Loop *L, DependenceInfo &DI) {
     vector<Instruction*> MemoryInsts;
     vector<Instruction*> FirstPartInsts;
@@ -59,7 +58,6 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Provera memorijskih zavisnosti
     for (size_t i = 0; i < MemoryInsts.size(); i++) {
       for (size_t j = i + 1; j < MemoryInsts.size(); j++) {
         Instruction *InstA = MemoryInsts[i];
@@ -73,7 +71,6 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Provera direktne SSA Def-Use zavisnosti
     for (Instruction *I1 : FirstPartInsts) {
       for (User *U : I1->users()) {
         if (Instruction *UI = dyn_cast<Instruction>(U)) {
@@ -120,34 +117,32 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // POPRAVLJENO BRISANJE BLOKOVA: Prvo čistimo PHI ulaze kod suseda pa tek onda brišemo blok
+  // Funkcija za popravku PHI čvorova tako da odgovaraju trenutnom CFG-u
+  void fixPhis(Function *F) {
+    for (BasicBlock &BB : *F) {
+      unordered_set<BasicBlock*> Preds(pred_begin(&BB), pred_end(&BB));
+      for (Instruction &I : BB) {
+        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+          for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
+            BasicBlock *IncBB = PN->getIncomingBlock(i);
+            if (Preds.find(IncBB) == Preds.end()) {
+              PN->removeIncomingValue(i, false);
+            }
+          }
+        }
+      }
+    }
+  }
+
   void safeDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
-    // 1. Zameniti sve upotrebe instrukcija sa undef
     for (BasicBlock *BB : BlocksToDelete) {
       if (!BB) continue;
       for (Instruction &I : *BB) {
         I.replaceAllUsesWith(UndefValue::get(I.getType()));
       }
-    }
-
-    // 2. Obavestiti sve susede (predecessors/successors) koji OSTAJU da je ovaj BB uklonjen
-    // Ovo automatski čisti PHI čvorove i sprečava <badref> greške
-    for (BasicBlock *BB : BlocksToDelete) {
-      if (!BB) continue;
-      for (BasicBlock *Succ : successors(BB)) {
-        if (BlocksToDelete.find(Succ) == BlocksToDelete.end()) {
-          Succ->removePredecessor(BB, true);
-        }
-      }
-    }
-
-    // 3. Otkazati sve reference unutar samog bloka
-    for (BasicBlock *BB : BlocksToDelete) {
-      if (!BB) continue;
       BB->dropAllReferences();
     }
 
-    // 4. Bezbedno izbrisati iz funkcije
     for (BasicBlock *BB : BlocksToDelete) {
       if (BB && BB->getParent()) {
         BB->eraseFromParent();
@@ -256,6 +251,9 @@ struct OurLoopFissionPass : public LoopPass {
         safeDeleteBlocks(BlocksToDelete);
       }
     }
+
+    // Čišćenje nevažećih predhodnika iz PHI čvorova u celoj funkciji
+    fixPhis(L->getHeader()->getParent());
 
     return true;
   }

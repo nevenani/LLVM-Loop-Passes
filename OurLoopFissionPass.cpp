@@ -4,6 +4,7 @@
 #include "llvm/Pass.h"
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/DependenceAnalysis.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
@@ -24,6 +25,69 @@ struct OurLoopFissionPass : public LoopPass {
   OurLoopFissionPass() : LoopPass(ID) {}
 
   vector<BasicBlock *> LoopBasicBlocks;
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addRequired<DependenceAnalysisWrapperPass>();
+    AU.setPreservesCFG();
+  }
+
+  // Funkcija za proveru zavisnosti pre razdvajanja
+  bool hasDependencies(Loop *L, DependenceInfo &DI) {
+    vector<Instruction*> MemoryInsts;
+    vector<Instruction*> FirstPartInsts;
+    vector<Instruction*> SecondPartInsts;
+
+    BasicBlock *FirstIf = findIfBasicBlock(LoopBasicBlocks, true);
+
+    // Razdvajanje instrukcija u dve grupe radi provere zavisnosti
+    bool inFirstPart = true;
+    for (BasicBlock *BB : LoopBasicBlocks) {
+      if (BB == FirstIf) inFirstPart = false;
+
+      for (Instruction &I : *BB) {
+        if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
+          MemoryInsts.push_back(&I);
+        }
+        if (inFirstPart) {
+          FirstPartInsts.push_back(&I);
+        } else {
+          SecondPartInsts.push_back(&I);
+        }
+      }
+    }
+
+    // SLUČAJ 1 & 2: Provera memorijskih zavisnosti (RAW, WAR, WAW)
+    for (size_t i = 0; i < MemoryInsts.size(); i++) {
+      for (size_t j = i + 1; j < MemoryInsts.size(); j++) {
+        Instruction *InstA = MemoryInsts[i];
+        Instruction *InstB = MemoryInsts[j];
+
+        if (auto D = DI.depends(InstA, InstB, true)) {
+          errs() << " [FISSION ZABRANJEN] Detektovana memorijska zavisnost izmedju: " 
+                 << *InstA << " i " << *InstB << "\n";
+          return true;
+        }
+      }
+    }
+
+    // SLUČAJ 3: Provera direktne SSA Def-Use zavisnosti (kao u primeru sa profesorom)
+    for (Instruction *I1 : FirstPartInsts) {
+      for (User *U : I1->users()) {
+        if (Instruction *UI = dyn_cast<Instruction>(U)) {
+          for (Instruction *I2 : SecondPartInsts) {
+            if (UI == I2) {
+              errs() << " [FISSION ZABRANJEN] Instrukcija u drugom delu koristi vrednost iz prvog dela: " 
+                     << *I2 << "\n";
+              return true;
+            }
+          }
+        }
+      }
+    }
+
+    return false;
+  }
 
   BasicBlock *findIfBasicBlock(const vector<BasicBlock*> &BBs, bool findFirst) {
     BasicBlock *LastBranchBlock = nullptr;
@@ -150,6 +214,13 @@ struct OurLoopFissionPass : public LoopPass {
     BasicBlock *FirstIf = findIfBasicBlock(LoopBasicBlocks, true);
     BasicBlock *LastIf = findIfBasicBlock(LoopBasicBlocks, false);
     if (!FirstIf || !LastIf || FirstIf == LastIf) {
+      return false;
+    }
+
+    // PROVERA ZAVISNOSTI: Ako zavisnosti postoje, prekida se rad pasa!
+    DependenceInfo &DI = getAnalysis<DependenceAnalysisWrapperPass>().getDI();
+    if (hasDependencies(L, DI)) {
+      errs() << "Petlja se NE MOZE razdvojiti zbog postojanja zavisnosti podataka!\n";
       return false;
     }
 

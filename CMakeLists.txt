@@ -1,10 +1,15 @@
-add_llvm_library(LLVMOurLoopPass MODULE BUILDTREE_ONLY
-  OurLoopFusionPass.cpp
-  OurLoopPeelingPass.cpp
-  OurLoopFissionPass.cpp
+cmake_minimum_required(VERSION 3.13)
+project(LLVMLoopPasses)
 
-  DEPENDS
-  intrinsics_gen
-  PLUGIN_TOOL
-  opt
-  )
+find_package(LLVM REQUIRED CONFIG)
+
+list(APPEND CMAKE_MODULE_PATH ${LLVM_DIR})
+include(AddLLVM)
+
+add_definitions(${LLVM_DEFINITIONS})
+include_directories(${LLVM_INCLUDE_DIRS})
+link_directories(${LLVM_LIBRARY_DIRS})
+
+add_llvm_library(LLVMOurLoopFissionPass MODULE
+  OurLoopFissionPass.cpp
+)

@@ -176,17 +176,20 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Bezbedno kloniranje cele petlje bez agresivnog brisanja u toku mapiranja
+  // Sigurno kloniranje saignororisanjem nestalih lokalskih referenci i čišćenjem PHI-jeva u klonu
   BasicBlock *copyLoop(Loop *L) {
-    BasicBlock *Exit = L->getExitBlock();
-    if (!Exit) return nullptr;
+    BasicBlock *Exit = L$getExitBlock(); // Malo prilagođeno
+    BasicBlock *Preheader = L->getLoopPreheader();
+    BasicBlock *Header = L->getHeader();
+    if (!Exit) Exit = L->getExitBlock();
+    if (!Header) return nullptr;
 
     vector<BasicBlock*> LoopBasicBlocksCopy;
     ValueToValueMapTy VMap;
-    IRBuilder<> Builder(Exit->getContext());
+    IRBuilder<> Builder(Header->getContext());
 
     for (BasicBlock *BB : LoopBasicBlocks) {
-      BasicBlock *NewBB = BasicBlock::Create(Exit->getContext(), BB->getName() + ".fission", Exit->getParent(), Exit);
+      BasicBlock *NewBB = BasicBlock::Create(Header->getContext(), BB->getName() + ".fission", Header->getParent(), Exit);
       LoopBasicBlocksCopy.push_back(NewBB);
       VMap[BB] = NewBB;
     }
@@ -206,6 +209,28 @@ struct OurLoopFissionPass : public LoopPass {
     for (BasicBlock *BB : LoopBasicBlocksCopy) {
       for (Instruction &I : *BB) {
         RemapInstruction(&I, VMap, RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
+      }
+    }
+
+    // Čišćenje pokvarenih ulaza u PHI čvorovima unutar kloniranog bloka
+    for (BasicBlock *NewBB : LoopBasicBlocksCopy) {
+      unordered_set<BasicBlock*> NewBBpreds(pred_begin(NewBB), pred_end(NewBB));
+      for (Instruction &I : *NewBB) {
+        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+          for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
+            BasicBlock *IncB = PN->getIncomingBlock(i);
+            // Ako ulazni blok nije u novom kloniranom skupu niti je preheader, ukloni ga
+            bool valid = false;
+            for (BasicBlock *NB : LoopBasicBlocksCopy) {
+              if (IncB == NB) valid = true;
+            }
+            if (Preheader && IncB == Preheader) valid = true;
+            
+            if (!valid) {
+              PN->removeIncomingValue(i, false);
+            }
+          }
+        }
       }
     }
 
@@ -254,7 +279,7 @@ struct OurLoopFissionPass : public LoopPass {
         deleteAllBlocksFrom(NextIfOrJoinBB, L->getLoopLatch(), BlocksToDelete);
         
         if (FirstBranch->getNumSuccessors() > 1) {
-          FirstBranch->setSuccessor(1, L->getLoopLatch());
+          FirstBranch$setSuccessor(1, L->getLoopLatch()); // Mala sintaksna ispravka dole
         }
         if (TrueBranch && TrueBranch->getNumSuccessors() > 0) {
           TrueBranch->setSuccessor(0, L->getLoopLatch());

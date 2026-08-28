@@ -38,17 +38,22 @@ struct OurLoopFissionPass : public LoopPass {
     vector<Instruction*> FirstPartInsts;
     vector<Instruction*> SecondPartInsts;
 
-    BasicBlock *FirstIf = findIfBasicBlock(LoopBasicBlocks, true);
+    // Granica između delova je drugi 'if' (LastIf)
+    BasicBlock *LastIf = findIfBasicBlock(LoopBasicBlocks, false);
 
     // Razdvajanje instrukcija u dve grupe radi provere zavisnosti
     bool inFirstPart = true;
     for (BasicBlock *BB : LoopBasicBlocks) {
-      if (BB == FirstIf) inFirstPart = false;
+      if (BB == LastIf) inFirstPart = false;
 
       for (Instruction &I : *BB) {
         if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
           MemoryInsts.push_back(&I);
         }
+
+        // PHI čvorovi drže stanje petlje i ne čine zavisnost između x i y
+        if (isa<PHINode>(&I)) continue;
+
         if (inFirstPart) {
           FirstPartInsts.push_back(&I);
         } else {
@@ -71,7 +76,7 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // SLUČAJ 3: Provera direktne SSA Def-Use zavisnosti (kao u primeru sa profesorom)
+    // SLUČAJ 3: Provera direktne SSA Def-Use zavisnosti
     for (Instruction *I1 : FirstPartInsts) {
       for (User *U : I1->users()) {
         if (Instruction *UI = dyn_cast<Instruction>(U)) {
@@ -103,7 +108,7 @@ struct OurLoopFissionPass : public LoopPass {
   }
 
   void deleteAllBlocksFrom(BasicBlock *Current, BasicBlock *BlockToStop,
-                           unordered_set<BasicBlock*> &BlocksToDelete) {
+                            unordered_set<BasicBlock*> &BlocksToDelete) {
     if (!Current || Current == BlockToStop) return;
     BlocksToDelete.insert(Current);
 

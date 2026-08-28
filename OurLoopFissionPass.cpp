@@ -136,26 +136,7 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Uklanjanje PHI čvorova koji imaju 1 ili 0 ulaza
-  void simplifySingleIncomingPhis(Function *F) {
-    for (BasicBlock &BB : *F) {
-      for (auto It = BB.begin(); It != BB.end(); ) {
-        Instruction &I = *It++;
-        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
-          if (PN->getNumIncomingValues() == 1) {
-            Value *SingleVal = PN->getIncomingValue(0);
-            PN->replaceAllUsesWith(SingleVal);
-            PN->eraseFromParent();
-          } else if (PN->getNumIncomingValues() == 0) {
-            PN->replaceAllUsesWith(UndefValue::get(PN->getType()));
-            PN->eraseFromParent();
-          }
-        }
-      }
-    }
-  }
-
-  // Usklađivanje PHI čvorova sa stvarnim CFG predhodnicima
+  // Bezbedna popravka PHI ulaza bez narušavanja SSA zavisnosti
   void fixPhisToMatchPreds(Function *F) {
     for (BasicBlock &BB : *F) {
       unordered_set<BasicBlock*> RealPreds(pred_begin(&BB), pred_end(&BB));
@@ -171,7 +152,6 @@ struct OurLoopFissionPass : public LoopPass {
         }
       }
     }
-    simplifySingleIncomingPhis(F);
   }
 
   BasicBlock *copyLoop(Loop *L) {
@@ -276,8 +256,10 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Sinhronizacija i čišćenje PHI čvorova nakon izmena CFG-a
-    fixPhisToMatchPreds(L->getHeader()->getParent());
+    // Uklanjamo samo višak nepostojećih predhodnika iz PHI čvorova
+    Function *F = L->getHeader()->getParent();
+    fixPhisToMatchPreds(F);
+    removeUnreachableBlocks(*F);
 
     return true;
   }

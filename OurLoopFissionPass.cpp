@@ -32,26 +32,24 @@ struct OurLoopFissionPass : public LoopPass {
     AU.setPreservesCFG();
   }
 
-  // Funkcija za proveru zavisnosti pre razdvajanja
+  // Funkcija za proveru zavisnosti pre razdvajanja (tvoja originalna logika)
   bool hasDependencies(Loop *L, DependenceInfo &DI) {
     vector<Instruction*> MemoryInsts;
     vector<Instruction*> FirstPartInsts;
     vector<Instruction*> SecondPartInsts;
 
-    // Granica između delova je drugi 'if' (LastIf)
-    BasicBlock *LastIf = findIfBasicBlock(LoopBasicBlocks, false);
+    BasicBlock *FirstIf = findIfBasicBlock(LoopBasicBlocks, true);
 
-    // Razdvajanje instrukcija u dve grupe radi provere zavisnosti
     bool inFirstPart = true;
     for (BasicBlock *BB : LoopBasicBlocks) {
-      if (BB == LastIf) inFirstPart = false;
+      if (BB == FirstIf) inFirstPart = false;
 
       for (Instruction &I : *BB) {
         if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
           MemoryInsts.push_back(&I);
         }
-
-        // PHI čvorovi drže stanje petlje i ne čine zavisnost između x i y
+        
+        // Preskačemo PHI čvorove petlje jer oni ne predstavljaju međusobnu zavisnost promenljivih
         if (isa<PHINode>(&I)) continue;
 
         if (inFirstPart) {
@@ -62,7 +60,7 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // SLUČAJ 1 & 2: Provera memorijskih zavisnosti (RAW, WAR, WAW)
+    // Provera memorijskih zavisnosti
     for (size_t i = 0; i < MemoryInsts.size(); i++) {
       for (size_t j = i + 1; j < MemoryInsts.size(); j++) {
         Instruction *InstA = MemoryInsts[i];
@@ -76,7 +74,7 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // SLUČAJ 3: Provera direktne SSA Def-Use zavisnosti
+    // Provera direktne SSA Def-Use zavisnosti
     for (Instruction *I1 : FirstPartInsts) {
       for (User *U : I1->users()) {
         if (Instruction *UI = dyn_cast<Instruction>(U)) {
@@ -123,6 +121,7 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
+  // DODOAVANJE VERIFIKACIJE PHI ČVOROVA: Sigurno uklanjanje blokova bez narušavanja SSA forme
   void safeDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
     for (BasicBlock *BB : BlocksToDelete) {
       if (!BB) continue;
@@ -184,6 +183,23 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
+    // AŽURIRANJE PHI ČVOROVA U KLONIRANOJ PETLJI
+    for (BasicBlock *BB : LoopBasicBlocksCopy) {
+      for (Instruction &I : *BB) {
+        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+          for (unsigned idx = 0; idx < PN->getNumIncomingValues(); ) {
+            BasicBlock *IncBB = PN->getIncomingBlock(idx);
+            if (VMap.count(IncBB)) {
+              PN->setIncomingBlock(idx, cast<BasicBlock>(VMap[IncBB]));
+              idx++;
+            } else {
+              PN->removeIncomingValue(idx, false);
+            }
+          }
+        }
+      }
+    }
+
     unordered_set<BasicBlock*> BlocksToDelete;
     BasicBlock *BlockToStart = findIfBasicBlock(LoopBasicBlocksCopy, true);
     BasicBlock *BlockToStop = findIfBasicBlock(LoopBasicBlocksCopy, false);
@@ -222,7 +238,6 @@ struct OurLoopFissionPass : public LoopPass {
       return false;
     }
 
-    // PROVERA ZAVISNOSTI: Ako zavisnosti postoje, prekida se rad pasa!
     DependenceInfo &DI = getAnalysis<DependenceAnalysisWrapperPass>().getDI();
     if (hasDependencies(L, DI)) {
       errs() << "Petlja se NE MOZE razdvojiti zbog postojanja zavisnosti podataka!\n";

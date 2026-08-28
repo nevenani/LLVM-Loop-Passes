@@ -40,12 +40,8 @@ struct OurLoopFissionPass : public LoopPass {
         AU.addRequired<DependenceAnalysisWrapperPass>();
     }
 
-    void collectBlocksUntil(
-        BasicBlock *Current,
-        BasicBlock *BlockToStop,
-        Loop *L,
-        unordered_set<BasicBlock *> &Blocks) {
-
+    void collectBlocksUntil(BasicBlock *Current, BasicBlock *BlockToStop, Loop *L,
+                            unordered_set<BasicBlock *> &Blocks) {
         if (!Current || Current == BlockToStop || !L->contains(Current)) {
             return;
         }
@@ -63,28 +59,15 @@ struct OurLoopFissionPass : public LoopPass {
         }
 
         for (unsigned i = 0; i < Term->getNumSuccessors(); i++) {
-            collectBlocksUntil(
-                Term->getSuccessor(i),
-                BlockToStop,
-                L,
-                Blocks
-            );
+            collectBlocksUntil(Term->getSuccessor(i), BlockToStop, L, Blocks);
         }
     }
 
-    bool instructionInBlocks(
-        Instruction *I,
-        const unordered_set<BasicBlock *> &Blocks) {
-
+    bool instructionInBlocks(Instruction *I, const unordered_set<BasicBlock *> &Blocks) {
         return I && Blocks.find(I->getParent()) != Blocks.end();
     }
 
-    bool hasDependencies(
-        Loop *L,
-        BasicBlock *FirstIf,
-        BasicBlock *LastIf,
-        DependenceInfo &DI) {
-
+    bool hasDependencies(Loop *L, BasicBlock *FirstIf, BasicBlock *LastIf, DependenceInfo &DI) {
         BasicBlock *Latch = L->getLoopLatch();
 
         if (!Latch) {
@@ -95,49 +78,25 @@ struct OurLoopFissionPass : public LoopPass {
         unordered_set<BasicBlock *> FirstPartBlocks;
         unordered_set<BasicBlock *> SecondPartBlocks;
 
-        collectBlocksUntil(
-            FirstIf,
-            LastIf,
-            L,
-            FirstPartBlocks
-        );
+        collectBlocksUntil(FirstIf, LastIf, L, FirstPartBlocks);
+        collectBlocksUntil(LastIf, Latch, L, SecondPartBlocks);
 
-        collectBlocksUntil(
-            LastIf,
-            Latch,
-            L,
-            SecondPartBlocks
-        );
-
-        errs() << "[ANALIZA] Blokova u prvom delu: "
-               << FirstPartBlocks.size()
-               << "\n";
-
-        errs() << "[ANALIZA] Blokova u drugom delu: "
-               << SecondPartBlocks.size()
-               << "\n";
+        errs() << "[ANALIZA] Blokova u prvom delu: " << FirstPartBlocks.size() << "\n";
+        errs() << "[ANALIZA] Blokova u drugom delu: " << SecondPartBlocks.size() << "\n";
 
         vector<Instruction *> FirstMemoryInsts;
         vector<Instruction *> SecondMemoryInsts;
-
-        // --------------------------------------------------------
-        // 1. SSA zavisnosti
-        // --------------------------------------------------------
-
         for (BasicBlock *BB : FirstPartBlocks) {
             for (Instruction &I : *BB) {
-
                 if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
                     FirstMemoryInsts.push_back(&I);
                 }
-
                 for (User *U : I.users()) {
                     Instruction *UserInst = dyn_cast<Instruction>(U);
 
                     if (!UserInst) {
                         continue;
                     }
-
                     if (!instructionInBlocks(UserInst, SecondPartBlocks)) {
                         continue;
                     }
@@ -155,7 +114,6 @@ struct OurLoopFissionPass : public LoopPass {
                             continue;
                         }
                     }
-
                     errs() << "[FISSION ZABRANJEN] SSA zavisnost izmedju delova petlje.\n";
                     errs() << "  Instrukcija iz prvog dela:\n";
                     errs() << "    " << I << "\n";
@@ -166,11 +124,9 @@ struct OurLoopFissionPass : public LoopPass {
                 }
             }
         }
-
         // --------------------------------------------------------
         // 2. Memorijske instrukcije drugog dela
         // --------------------------------------------------------
-
         for (BasicBlock *BB : SecondPartBlocks) {
             for (Instruction &I : *BB) {
                 if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
@@ -185,7 +141,6 @@ struct OurLoopFissionPass : public LoopPass {
 
         for (Instruction *I1 : FirstMemoryInsts) {
             for (Instruction *I2 : SecondMemoryInsts) {
-
                 if (DI.depends(I1, I2, true)) {
                     errs() << "[FISSION ZABRANJEN] Memorijska zavisnost izmedju delova petlje.\n";
                     errs() << "  Prvi deo:\n";
@@ -258,10 +213,7 @@ struct OurLoopFissionPass : public LoopPass {
     // Odavde nastavlja tvoj originalni kod.
     // ============================================================
 
-    BasicBlock *findIfBasicBlock(
-        const vector<BasicBlock *> &BBs,
-        bool findFirst) {
-
+    BasicBlock *findIfBasicBlock(const vector<BasicBlock *> &BBs, bool findFirst) {
         BasicBlock *LastBranchBlock = nullptr;
 
         for (size_t i = 1; i < BBs.size(); i++) {
@@ -279,11 +231,8 @@ struct OurLoopFissionPass : public LoopPass {
         return LastBranchBlock;
     }
 
-    void deleteAllBlocksFrom(
-        BasicBlock *Current,
-        BasicBlock *BlockToStop,
-        unordered_set<BasicBlock *> &BlocksToDelete) {
-
+    void deleteAllBlocksFrom(BasicBlock *Current, BasicBlock *BlockToStop,
+                             unordered_set<BasicBlock *> &BlocksToDelete) {
         if (!Current || Current == BlockToStop) {
             return;
         }
@@ -299,30 +248,20 @@ struct OurLoopFissionPass : public LoopPass {
         for (size_t i = 0; i < TI->getNumSuccessors(); i++) {
             BasicBlock *Successor = TI->getSuccessor(i);
 
-            if (BlocksToDelete.find(Successor) == BlocksToDelete.end() &&
-                Successor != BlockToStop) {
-
-                deleteAllBlocksFrom(
-                    Successor,
-                    BlockToStop,
-                    BlocksToDelete
-                );
+            if (BlocksToDelete.find(Successor) == BlocksToDelete.end() && Successor != BlockToStop) {
+                deleteAllBlocksFrom(Successor, BlockToStop, BlocksToDelete);
             }
         }
     }
 
-    void safeDeleteBlocks(
-        const unordered_set<BasicBlock *> &BlocksToDelete) {
-
+    void safeDeleteBlocks(const unordered_set<BasicBlock *> &BlocksToDelete) {
         for (BasicBlock *BB : BlocksToDelete) {
             if (!BB) {
                 continue;
             }
 
             for (Instruction &I : *BB) {
-                I.replaceAllUsesWith(
-                    UndefValue::get(I.getType())
-                );
+                I.replaceAllUsesWith(UndefValue::get(I.getType()));
             }
         }
 
@@ -365,12 +304,8 @@ struct OurLoopFissionPass : public LoopPass {
         IRBuilder<> Builder(Exit->getContext());
 
         for (BasicBlock *BB : LoopBasicBlocks) {
-            BasicBlock *NewBB = BasicBlock::Create(
-                Exit->getContext(),
-                BB->getName() + ".fission",
-                Exit->getParent(),
-                Exit
-            );
+            BasicBlock *NewBB =
+                BasicBlock::Create(Exit->getContext(), BB->getName() + ".fission", Exit->getParent(), Exit);
 
             LoopBasicBlocksCopy.push_back(NewBB);
             VMap[BB] = NewBB;
@@ -392,37 +327,22 @@ struct OurLoopFissionPass : public LoopPass {
 
         for (BasicBlock *BB : LoopBasicBlocksCopy) {
             for (Instruction &I : *BB) {
-                RemapInstruction(
-                    &I,
-                    VMap,
-                    RF_NoModuleLevelChanges | RF_IgnoreMissingLocals
-                );
+                RemapInstruction(&I, VMap, RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
             }
         }
 
         unordered_set<BasicBlock *> BlocksToDelete;
 
-        BasicBlock *BlockToStart =
-            findIfBasicBlock(LoopBasicBlocksCopy, true);
-
-        BasicBlock *BlockToStop =
-            findIfBasicBlock(LoopBasicBlocksCopy, false);
+        BasicBlock *BlockToStart = findIfBasicBlock(LoopBasicBlocksCopy, true);
+        BasicBlock *BlockToStop = findIfBasicBlock(LoopBasicBlocksCopy, false);
 
         if (BlockToStart && BlockToStop) {
-            deleteAllBlocksFrom(
-                BlockToStart,
-                BlockToStop,
-                BlocksToDelete
-            );
+            deleteAllBlocksFrom(BlockToStart, BlockToStop, BlocksToDelete);
 
-            Instruction *HeaderTerm =
-                LoopBasicBlocksCopy.front()->getTerminator();
+            Instruction *HeaderTerm = LoopBasicBlocksCopy.front()->getTerminator();
 
             if (HeaderTerm && HeaderTerm->getNumSuccessors() > 0) {
-                HeaderTerm->setSuccessor(
-                    0,
-                    BlockToStop
-                );
+                HeaderTerm->setSuccessor(0, BlockToStop);
             }
 
             safeDeleteBlocks(BlocksToDelete);
@@ -435,33 +355,21 @@ struct OurLoopFissionPass : public LoopPass {
         BasicBlock *LoopCopy = copyLoop(L);
 
         if (LoopCopy && !LoopBasicBlocks.empty()) {
-            Instruction *Term =
-                LoopBasicBlocks.front()->getTerminator();
+            Instruction *Term = LoopBasicBlocks.front()->getTerminator();
 
             if (Term && Term->getNumSuccessors() > 1) {
-                Term->setSuccessor(
-                    1,
-                    LoopCopy
-                );
+                Term->setSuccessor(1, LoopCopy);
             }
         }
     }
 
-    bool runOnLoop(
-        Loop *L,
-        LPPassManager &LPM) override {
-
-        errs() << "Procesiram petlju: "
-               << L->getHeader()->getName()
-               << "\n";
+    bool runOnLoop(Loop *L, LPPassManager &LPM) override {
+        errs() << "Procesiram petlju: " << L->getHeader()->getName() << "\n";
 
         LoopBasicBlocks = L->getBlocksVector();
 
-        BasicBlock *FirstIf =
-            findIfBasicBlock(LoopBasicBlocks, true);
-
-        BasicBlock *LastIf =
-            findIfBasicBlock(LoopBasicBlocks, false);
+        BasicBlock *FirstIf = findIfBasicBlock(LoopBasicBlocks, true);
+        BasicBlock *LastIf = findIfBasicBlock(LoopBasicBlocks, false);
 
         if (!FirstIf || !LastIf || FirstIf == LastIf) {
             return false;
@@ -474,8 +382,7 @@ struct OurLoopFissionPass : public LoopPass {
         // pre loopFission proveravamo da li je podela bezbedna.
         // ========================================================
 
-        DependenceInfo &DI =
-            getAnalysis<DependenceAnalysisWrapperPass>().getDI();
+        DependenceInfo &DI = getAnalysis<DependenceAnalysisWrapperPass>().getDI();
 
         if (hasDependencies(L, FirstIf, LastIf, DI)) {
             errs() << "[FISSION] Petlja se NE razdvaja jer postoje zavisnosti izmedju delova.\n";
@@ -491,49 +398,26 @@ struct OurLoopFissionPass : public LoopPass {
 
         loopFission(L);
 
-        BasicBlock *BranchBlock =
-            findIfBasicBlock(LoopBasicBlocks, true);
+        BasicBlock *BranchBlock = findIfBasicBlock(LoopBasicBlocks, true);
 
         if (BranchBlock) {
-            BranchInst *FirstBranch =
-                dyn_cast<BranchInst>(
-                    BranchBlock->getTerminator()
-                );
+            BranchInst *FirstBranch = dyn_cast<BranchInst>(BranchBlock->getTerminator());
 
             if (FirstBranch && FirstBranch->isConditional()) {
-                BasicBlock *TrueBB =
-                    FirstBranch->getSuccessor(0);
-
-                BasicBlock *NextIfOrJoinBB =
-                    FirstBranch->getSuccessor(1);
-
-                BranchInst *TrueBranch =
-                    dyn_cast<BranchInst>(
-                        TrueBB->getTerminator()
-                    );
+                BasicBlock *TrueBB = FirstBranch->getSuccessor(0);
+                BasicBlock *NextIfOrJoinBB = FirstBranch->getSuccessor(1);
+                BranchInst *TrueBranch = dyn_cast<BranchInst>(TrueBB->getTerminator());
 
                 unordered_set<BasicBlock *> BlocksToDelete;
 
-                deleteAllBlocksFrom(
-                    NextIfOrJoinBB,
-                    L->getLoopLatch(),
-                    BlocksToDelete
-                );
+                deleteAllBlocksFrom(NextIfOrJoinBB, L->getLoopLatch(), BlocksToDelete);
 
                 if (FirstBranch->getNumSuccessors() > 1) {
-                    FirstBranch->setSuccessor(
-                        1,
-                        L->getLoopLatch()
-                    );
+                    FirstBranch->setSuccessor(1, L->getLoopLatch());
                 }
 
-                if (TrueBranch &&
-                    TrueBranch->getNumSuccessors() > 0) {
-
-                    TrueBranch->setSuccessor(
-                        0,
-                        L->getLoopLatch()
-                    );
+                if (TrueBranch && TrueBranch->getNumSuccessors() > 0) {
+                    TrueBranch->setSuccessor(0, L->getLoopLatch());
                 }
 
                 safeDeleteBlocks(BlocksToDelete);
@@ -548,7 +432,4 @@ struct OurLoopFissionPass : public LoopPass {
 
 char OurLoopFissionPass::ID = 0;
 
-static RegisterPass<OurLoopFissionPass> X(
-    "Our-Loop-Fission-pass",
-    "Our Loop Fission Pass"
-);
+static RegisterPass<OurLoopFissionPass> X("Our-Loop-Fission-pass", "Our Loop Fission Pass");

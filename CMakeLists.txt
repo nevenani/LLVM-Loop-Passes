@@ -15,6 +15,7 @@ set(LLVM_OPTIONAL_SOURCES
   OurLoopFusionPass.cpp
   OurLoopPeelingPass.cpp
   testForFission.c
+  antitestForFission.c
   testForFussion.c
   testForPeeling.c
 )

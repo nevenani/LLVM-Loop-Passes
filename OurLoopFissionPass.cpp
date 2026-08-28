@@ -32,6 +32,7 @@ struct OurLoopFissionPass : public LoopPass {
     AU.setPreservesCFG();
   }
 
+  // Provera zavisnosti pre razdvajanja petlje
   bool hasDependencies(Loop *L, DependenceInfo &DI) {
     vector<Instruction*> MemoryInsts;
     vector<Instruction*> FirstPartInsts;
@@ -58,6 +59,7 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
+    // Provera memorijskih zavisnosti
     for (size_t i = 0; i < MemoryInsts.size(); i++) {
       for (size_t j = i + 1; j < MemoryInsts.size(); j++) {
         Instruction *InstA = MemoryInsts[i];
@@ -71,6 +73,7 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
+    // Provera direktnih SSA Def-Use zavisnosti
     for (Instruction *I1 : FirstPartInsts) {
       for (User *U : I1->users()) {
         if (Instruction *UI = dyn_cast<Instruction>(U)) {
@@ -117,23 +120,6 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Funkcija za popravku PHI čvorova tako da odgovaraju trenutnom CFG-u
-  void fixPhis(Function *F) {
-    for (BasicBlock &BB : *F) {
-      unordered_set<BasicBlock*> Preds(pred_begin(&BB), pred_end(&BB));
-      for (Instruction &I : BB) {
-        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
-          for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
-            BasicBlock *IncBB = PN->getIncomingBlock(i);
-            if (Preds.find(IncBB) == Preds.end()) {
-              PN->removeIncomingValue(i, false);
-            }
-          }
-        }
-      }
-    }
-  }
-
   void safeDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
     for (BasicBlock *BB : BlocksToDelete) {
       if (!BB) continue;
@@ -148,6 +134,44 @@ struct OurLoopFissionPass : public LoopPass {
         BB->eraseFromParent();
       }
     }
+  }
+
+  // Uklanjanje PHI čvorova koji imaju 1 ili 0 ulaza
+  void simplifySingleIncomingPhis(Function *F) {
+    for (BasicBlock &BB : *F) {
+      for (auto It = BB.begin(); It != BB.end(); ) {
+        Instruction &I = *It++;
+        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+          if (PN->getNumIncomingValues() == 1) {
+            Value *SingleVal = PN->getIncomingValue(0);
+            PN->replaceAllUsesWith(SingleVal);
+            PN->eraseFromParent();
+          } else if (PN->getNumIncomingValues() == 0) {
+            PN->replaceAllUsesWith(UndefValue::get(PN->getType()));
+            PN->eraseFromParent();
+          }
+        }
+      }
+    }
+  }
+
+  // Usklađivanje PHI čvorova sa stvarnim CFG predhodnicima
+  void fixPhisToMatchPreds(Function *F) {
+    for (BasicBlock &BB : *F) {
+      unordered_set<BasicBlock*> RealPreds(pred_begin(&BB), pred_end(&BB));
+
+      for (Instruction &I : BB) {
+        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+          for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
+            BasicBlock *IncBB = PN->getIncomingBlock(i);
+            if (RealPreds.find(IncBB) == RealPreds.end()) {
+              PN->removeIncomingValue(i, false);
+            }
+          }
+        }
+      }
+    }
+    simplifySingleIncomingPhis(F);
   }
 
   BasicBlock *copyLoop(Loop *L) {
@@ -252,8 +276,8 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Čišćenje nevažećih predhodnika iz PHI čvorova u celoj funkciji
-    fixPhis(L->getHeader()->getParent());
+    // Sinhronizacija i čišćenje PHI čvorova nakon izmena CFG-a
+    fixPhisToMatchPreds(L->getHeader()->getParent());
 
     return true;
   }

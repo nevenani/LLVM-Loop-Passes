@@ -7,24 +7,24 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Install LLVM 14 and Clang
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y llvm-14 llvm-14-dev clang-14 cmake
+      - name: Install LLVM 14 and Clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-14 llvm-14-dev clang-14 cmake
 
-    - name: Build Project
-      run: |
-        mkdir build
-        cd build
-        cmake -DLLVM_DIR=/usr/lib/llvm-14/lib/cmake/llvm ..
-        make
+      - name: Build Project
+        run: |
+          mkdir build
+          cd build
+          cmake -DLLVM_DIR=/usr/lib/llvm-14/lib/cmake/llvm ..
+          make
 
-    - name: Test Fission Pass
-      run: |
-        clang-14 -S -emit-llvm -O0 -Xclang -disable-O0-optnone testForFission.c -o testForFission.ll
-        opt-14 -enable-new-pm=0 -mem2reg -S testForFission.ll -o test_prep.ll
-        opt-14 -enable-new-pm=0 -load build/LLVMOurLoopFissionPass.so -Our-Loop-Fission-pass -S test_prep.ll -o output_fission.ll
-        cat output_fission.ll
+      - name: Test Fission Pass
+        run: |
+          clang-14 -S -emit-llvm -O0 -Xclang -disable-O0-optnone testForFission.c -o testForFission.ll
+          opt-14 -enable-new-pm=0 -load build/LLVMOurLoopFissionPass.so -Our-Loop-Fission-pass -S testForFission.ll -o output_fission.ll
+          cat output_fission.ll
+        

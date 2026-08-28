@@ -24,14 +24,7 @@ jobs:
 
     - name: Test Fission Pass
       run: |
-        # 1. Prevođenje C test primera u LLVM IR (.ll)
         clang-14 -S -emit-llvm -O0 -Xclang -disable-O0-optnone testForFission.c -o testForFission.ll
-
-        # 2. Priprema IR-a sa mem2reg
         opt-14 -enable-new-pm=0 -mem2reg -S testForFission.ll -o test_prep.ll
-
-        # 3. Pokretanje pasa
-        opt-14 -enable-new-pm=0 -load build/LLVMOurLoopFissionPass.so -our-loop-fission -S test_prep.ll -o output_fission.ll
-
-        # 4. Ispis rezultata
+        opt-14 -enable-new-pm=0 -load build/LLVMOurLoopFissionPass.so -Our-Loop-Fission-pass -S test_prep.ll -o output_fission.ll
         cat output_fission.ll

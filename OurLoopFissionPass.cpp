@@ -3,10 +3,10 @@
 #include <unordered_set>
 
 #include "llvm/Pass.h"
+
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/DependenceAnalysis.h"
-#include "llvm/Analysis/InstructionSimplify.h"
 
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/CFG.h"
@@ -28,19 +28,32 @@ using namespace llvm;
 namespace {
 
 struct OurLoopFissionPass : public LoopPass {
+
   static char ID;
 
-  OurLoopFissionPass() : LoopPass(ID) {}
+  OurLoopFissionPass()
+      : LoopPass(ID) {}
 
   vector<BasicBlock *> LoopBasicBlocks;
 
+  // ============================================================
+  // LLVM analize koje pass koristi
+  // ============================================================
+
   void getAnalysisUsage(AnalysisUsage &AU) const override {
+
     AU.addRequired<LoopInfoWrapperPass>();
     AU.addRequired<DependenceAnalysisWrapperPass>();
 
-    // NE stavljamo AU.setPreservesCFG(),
-    // jer pass menja CFG.
+    // NE koristimo setPreservesCFG(),
+    // jer ovaj pass menja CFG.
   }
+
+  // ============================================================
+  // Pronalazi prvi ili poslednji blok koji sadrzi ICmp.
+  //
+  // U ovom projektu to predstavlja prvi odnosno drugi IF.
+  // ============================================================
 
   BasicBlock *findIfBasicBlock(
       const vector<BasicBlock *> &BBs,
@@ -48,15 +61,19 @@ struct OurLoopFissionPass : public LoopPass {
 
     BasicBlock *LastBranchBlock = nullptr;
 
-    for (size_t i = 1; i < BBs.size(); i++) {
+    for (size_t i = 1;
+         i < BBs.size();
+         i++) {
+
       for (Instruction &I : *BBs[i]) {
 
         if (isa<ICmpInst>(&I)) {
-          if (findFirst) {
-            return BBs[i];
-          }
 
-          LastBranchBlock = BBs[i];
+          if (findFirst)
+            return BBs[i];
+
+          LastBranchBlock =
+              BBs[i];
         }
       }
     }
@@ -64,116 +81,200 @@ struct OurLoopFissionPass : public LoopPass {
     return LastBranchBlock;
   }
 
+  // ============================================================
+  // Prikuplja blokove od Current do BlockToStop.
+  //
+  // BlockToStop se NE dodaje u skup.
+  //
+  // Koristimo ovu funkciju samo za analizu zavisnosti.
+  // ============================================================
+
+  void collectBlocksUntil(
+      BasicBlock *Current,
+      BasicBlock *BlockToStop,
+      Loop *L,
+      unordered_set<BasicBlock *> &Blocks) {
+
+    if (!Current)
+      return;
+
+    if (Current == BlockToStop)
+      return;
+
+    if (!L->contains(Current))
+      return;
+
+    if (Blocks.find(Current) !=
+        Blocks.end())
+      return;
+
+    Blocks.insert(Current);
+
+    Instruction *Term =
+        Current->getTerminator();
+
+    if (!Term)
+      return;
+
+    for (unsigned i = 0;
+         i < Term->getNumSuccessors();
+         i++) {
+
+      BasicBlock *Successor =
+          Term->getSuccessor(i);
+
+      collectBlocksUntil(
+          Successor,
+          BlockToStop,
+          L,
+          Blocks);
+    }
+  }
+
+  // ============================================================
+  // Da li instrukcija pripada zadatom skupu blokova?
+  // ============================================================
+
+  bool instructionInBlocks(
+      Instruction *I,
+      const unordered_set<BasicBlock *> &Blocks) {
+
+    if (!I)
+      return false;
+
+    return Blocks.find(I->getParent()) !=
+           Blocks.end();
+  }
+
+  // ============================================================
+  // ANALIZA ZAVISNOSTI
+  //
+  // Petlju delimo na:
+  //
+  //   FIRST PART
+  //      prvi IF i njegove blokove
+  //
+  //   SECOND PART
+  //      drugi IF i njegove blokove
+  //
+  // Fission dozvoljavamo samo ako izmedju ova dva dela
+  // ne postoji zavisnost koja bi promenom redosleda izvrsavanja
+  // promenila semantiku programa.
+  // ============================================================
+
   bool hasDependencies(
       Loop *L,
+      BasicBlock *FirstIf,
+      BasicBlock *LastIf,
       DependenceInfo &DI) {
 
-    vector<Instruction *> MemoryInsts;
-    vector<Instruction *> FirstPartInsts;
-    vector<Instruction *> SecondPartInsts;
+    BasicBlock *Latch =
+        L->getLoopLatch();
 
-    BasicBlock *FirstIf =
-        findIfBasicBlock(LoopBasicBlocks, true);
+    if (!Latch) {
 
-    if (!FirstIf) {
+      errs()
+          << "[FISSION] Petlja nema latch blok.\n";
+
       return true;
     }
 
-    bool inFirstPart = true;
+    unordered_set<BasicBlock *>
+        FirstPartBlocks;
 
-    for (BasicBlock *BB : LoopBasicBlocks) {
+    unordered_set<BasicBlock *>
+        SecondPartBlocks;
 
-      if (BB == FirstIf) {
-        inFirstPart = false;
-      }
+    // ----------------------------------------------------------
+    // Prvi deo:
+    //
+    // FirstIf ---> ... ---> LastIf
+    //
+    // LastIf se ne ukljucuje.
+    // ----------------------------------------------------------
 
-      for (Instruction &I : *BB) {
+    collectBlocksUntil(
+        FirstIf,
+        LastIf,
+        L,
+        FirstPartBlocks);
+
+    // ----------------------------------------------------------
+    // Drugi deo:
+    //
+    // LastIf ---> ... ---> Latch
+    //
+    // Latch se ne ukljucuje.
+    // ----------------------------------------------------------
+
+    collectBlocksUntil(
+        LastIf,
+        Latch,
+        L,
+        SecondPartBlocks);
+
+    errs()
+        << "[ANALIZA] Blokova u prvom delu: "
+        << FirstPartBlocks.size()
+        << "\n";
+
+    errs()
+        << "[ANALIZA] Blokova u drugom delu: "
+        << SecondPartBlocks.size()
+        << "\n";
+
+    vector<Instruction *>
+        FirstMemoryInsts;
+
+    vector<Instruction *>
+        SecondMemoryInsts;
+
+    // ==========================================================
+    // 1. Direktne SSA zavisnosti
+    // ==========================================================
+
+    for (BasicBlock *BB :
+         FirstPartBlocks) {
+
+      for (Instruction &I :
+           *BB) {
 
         if (isa<LoadInst>(&I) ||
             isa<StoreInst>(&I)) {
 
-          MemoryInsts.push_back(&I);
+          FirstMemoryInsts.push_back(
+              &I);
         }
 
-        if (isa<PHINode>(&I)) {
-          continue;
-        }
+        //
+        // Ako rezultat instrukcije iz prvog dela koristi
+        // instrukcija u drugom delu, drugi deo zavisi od prvog.
+        //
+        for (User *U :
+             I.users()) {
 
-        if (inFirstPart) {
-          FirstPartInsts.push_back(&I);
-        } else {
-          SecondPartInsts.push_back(&I);
-        }
-      }
-    }
+          Instruction *UserInst =
+              dyn_cast<Instruction>(U);
 
-    //
-    // Memorijske zavisnosti
-    //
-    for (size_t i = 0;
-         i < MemoryInsts.size();
-         i++) {
+          if (!UserInst)
+            continue;
 
-      for (size_t j = i + 1;
-           j < MemoryInsts.size();
-           j++) {
-
-        Instruction *InstA =
-            MemoryInsts[i];
-
-        Instruction *InstB =
-            MemoryInsts[j];
-
-        if (DI.depends(
-                InstA,
-                InstB,
-                true)) {
-
-          errs()
-              << " [FISSION ZABRANJEN] "
-              << "Detektovana memorijska zavisnost izmedju:\n";
-
-          errs()
-              << "   " << *InstA
-              << "\n";
-
-          errs()
-              << "   " << *InstB
-              << "\n";
-
-          return true;
-        }
-      }
-    }
-
-    //
-    // SSA zavisnosti
-    //
-    for (Instruction *I1 :
-         FirstPartInsts) {
-
-      for (User *U :
-           I1->users()) {
-
-        Instruction *UI =
-            dyn_cast<Instruction>(U);
-
-        if (!UI) {
-          continue;
-        }
-
-        for (Instruction *I2 :
-             SecondPartInsts) {
-
-          if (UI == I2) {
+          if (instructionInBlocks(
+                  UserInst,
+                  SecondPartBlocks)) {
 
             errs()
-                << " [FISSION ZABRANJEN] "
-                << "Instrukcija u drugom delu "
-                << "koristi vrednost iz prvog dela:\n";
+                << "[FISSION ZABRANJEN] "
+                << "SSA zavisnost izmedju delova petlje.\n";
 
             errs()
-                << "   " << *I2
+                << "  Instrukcija iz prvog dela:\n    "
+                << I
+                << "\n";
+
+            errs()
+                << "  Koristi se u drugom delu:\n    "
+                << *UserInst
                 << "\n";
 
             return true;
@@ -182,8 +283,168 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
+    for (BasicBlock *BB :
+         SecondPartBlocks) {
+
+      for (Instruction &I :
+           *BB) {
+
+        if (isa<LoadInst>(&I) ||
+            isa<StoreInst>(&I)) {
+
+          SecondMemoryInsts.push_back(
+              &I);
+        }
+      }
+    }
+
+    // ==========================================================
+    // 2. Memorijske zavisnosti
+    //
+    // Proveravamo samo:
+    //
+    //     FIRST PART <--> SECOND PART
+    //
+    // Ne proveravamo instrukcije unutar istog dela jer one
+    // ne sprecavaju samo razdvajanje ova dva dela.
+    // ==========================================================
+
+    for (Instruction *I1 :
+         FirstMemoryInsts) {
+
+      for (Instruction *I2 :
+           SecondMemoryInsts) {
+
+        if (DI.depends(
+                I1,
+                I2,
+                true)) {
+
+          errs()
+              << "[FISSION ZABRANJEN] "
+              << "Memorijska zavisnost izmedju delova petlje.\n";
+
+          errs()
+              << "  Prvi deo:\n    "
+              << *I1
+              << "\n";
+
+          errs()
+              << "  Drugi deo:\n    "
+              << *I2
+              << "\n";
+
+          return true;
+        }
+
+        //
+        // Proveravamo i obrnut smer.
+        //
+        if (DI.depends(
+                I2,
+                I1,
+                true)) {
+
+          errs()
+              << "[FISSION ZABRANJEN] "
+              << "Memorijska zavisnost izmedju delova petlje.\n";
+
+          errs()
+              << "  Drugi deo:\n    "
+              << *I2
+              << "\n";
+
+          errs()
+              << "  Prvi deo:\n    "
+              << *I1
+              << "\n";
+
+          return true;
+        }
+      }
+    }
+
+    // ==========================================================
+    // 3. PHI zavisnosti
+    //
+    // Ovo je veoma bitno posle mem2reg.
+    //
+    // Na primer:
+    //
+    //    x = phi ...
+    //
+    // Ako se isti PHI koristi i u prvom i u drugom delu,
+    // razdvajanje moze promeniti redosled vrednosti.
+    // ==========================================================
+
+    BasicBlock *Header =
+        L->getHeader();
+
+    for (Instruction &I :
+         *Header) {
+
+      PHINode *PN =
+          dyn_cast<PHINode>(&I);
+
+      if (!PN)
+        break;
+
+      bool UsedInFirstPart =
+          false;
+
+      bool UsedInSecondPart =
+          false;
+
+      for (User *U :
+           PN->users()) {
+
+        Instruction *UserInst =
+            dyn_cast<Instruction>(U);
+
+        if (!UserInst)
+          continue;
+
+        if (instructionInBlocks(
+                UserInst,
+                FirstPartBlocks)) {
+
+          UsedInFirstPart =
+              true;
+        }
+
+        if (instructionInBlocks(
+                UserInst,
+                SecondPartBlocks)) {
+
+          UsedInSecondPart =
+              true;
+        }
+      }
+
+      if (UsedInFirstPart &&
+          UsedInSecondPart) {
+
+        errs()
+            << "[FISSION ZABRANJEN] "
+            << "Ista PHI promenljiva koristi se "
+               "u oba dela petlje:\n    "
+            << *PN
+            << "\n";
+
+        return true;
+      }
+    }
+
+    errs()
+        << "[ANALIZA] Nisu pronadjene zavisnosti "
+           "koje sprecavaju loop fission.\n";
+
     return false;
   }
+
+  // ============================================================
+  // ORIGINALNA FUNKCIJA
+  // ============================================================
 
   void deleteAllBlocksFrom(
       BasicBlock *Current,
@@ -191,67 +452,75 @@ struct OurLoopFissionPass : public LoopPass {
       unordered_set<BasicBlock *> &BlocksToDelete) {
 
     if (!Current ||
-        Current == BlockToStop) {
+        Current == BlockToStop)
       return;
-    }
 
-    if (BlocksToDelete.find(Current) !=
-        BlocksToDelete.end()) {
-      return;
-    }
-
-    BlocksToDelete.insert(Current);
+    BlocksToDelete.insert(
+        Current);
 
     Instruction *TI =
         Current->getTerminator();
 
-    if (!TI) {
+    if (!TI)
       return;
-    }
 
-    for (unsigned i = 0;
+    for (size_t i = 0;
          i < TI->getNumSuccessors();
          i++) {
 
       BasicBlock *Successor =
           TI->getSuccessor(i);
 
-      if (Successor ==
-          BlockToStop) {
-        continue;
-      }
+      if (BlocksToDelete.find(Successor) ==
+              BlocksToDelete.end() &&
+          Successor != BlockToStop) {
 
-      deleteAllBlocksFrom(
-          Successor,
-          BlockToStop,
-          BlocksToDelete);
+        deleteAllBlocksFrom(
+            Successor,
+            BlockToStop,
+            BlocksToDelete);
+      }
     }
   }
 
-  void unlinkAndDeleteBlocks(
+  // ============================================================
+  // ORIGINALNA FUNKCIJA
+  //
+  // Jedina mala izmena:
+  //
+  // UndefValue se pravi samo za non-void instrukcije.
+  // Branch i ostali terminatori imaju void tip.
+  // ============================================================
+
+  void safeDeleteBlocks(
       const unordered_set<BasicBlock *> &BlocksToDelete) {
 
-    //
-    // Prvo uklanjamo predecessor veze
-    //
     for (BasicBlock *BB :
          BlocksToDelete) {
 
-      if (!BB ||
-          !BB->getParent()) {
+      if (!BB)
         continue;
-      }
 
-      vector<BasicBlock *> Successors;
+      for (Instruction &I :
+           *BB) {
+
+        if (!I.getType()->isVoidTy()) {
+
+          I.replaceAllUsesWith(
+              UndefValue::get(
+                  I.getType()));
+        }
+      }
+    }
+
+    for (BasicBlock *BB :
+         BlocksToDelete) {
+
+      if (!BB)
+        continue;
 
       for (BasicBlock *Succ :
            successors(BB)) {
-
-        Successors.push_back(Succ);
-      }
-
-      for (BasicBlock *Succ :
-           Successors) {
 
         if (BlocksToDelete.find(Succ) ==
             BlocksToDelete.end()) {
@@ -263,22 +532,15 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    //
-    // Zatim skidamo reference
-    //
     for (BasicBlock *BB :
          BlocksToDelete) {
 
-      if (BB &&
-          BB->getParent()) {
+      if (!BB)
+        continue;
 
-        BB->dropAllReferences();
-      }
+      BB->dropAllReferences();
     }
 
-    //
-    // Na kraju brisemo blokove
-    //
     for (BasicBlock *BB :
          BlocksToDelete) {
 
@@ -290,113 +552,9 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  void cleanupFunctionPhis(
-      Function *F) {
-
-    const DataLayout &DL =
-        F->getParent()->getDataLayout();
-
-    //
-    // Uklanjanje PHI incoming vrednosti
-    // koje vise nemaju predecessor.
-    //
-    for (BasicBlock &BB :
-         *F) {
-
-      unordered_set<BasicBlock *> RealPreds(
-          pred_begin(&BB),
-          pred_end(&BB));
-
-      for (Instruction &I :
-           BB) {
-
-        PHINode *PN =
-            dyn_cast<PHINode>(&I);
-
-        if (!PN) {
-          continue;
-        }
-
-        for (int i =
-                 static_cast<int>(
-                     PN->getNumIncomingValues()) - 1;
-             i >= 0;
-             i--) {
-
-          BasicBlock *Incoming =
-              PN->getIncomingBlock(i);
-
-          if (RealPreds.find(Incoming) ==
-              RealPreds.end()) {
-
-            PN->removeIncomingValue(
-                i,
-                false);
-          }
-        }
-      }
-    }
-
-    //
-    // Pojednostavljivanje PHI cvorova
-    //
-    bool Changed = true;
-
-    while (Changed) {
-
-      Changed = false;
-
-      for (BasicBlock &BB :
-           *F) {
-
-        for (auto It = BB.begin();
-             It != BB.end();) {
-
-          Instruction &I =
-              *It++;
-
-          PHINode *PN =
-              dyn_cast<PHINode>(&I);
-
-          if (!PN) {
-            continue;
-          }
-
-          if (PN->getNumIncomingValues() ==
-              0) {
-
-            PN->replaceAllUsesWith(
-                UndefValue::get(
-                    PN->getType()));
-
-            PN->eraseFromParent();
-
-            Changed = true;
-
-            continue;
-          }
-
-          SimplifyQuery SQ(
-              DL,
-              PN);
-
-          Value *V =
-              SimplifyInstruction(
-                  PN,
-                  SQ);
-
-          if (V &&
-              V != PN) {
-
-            PN->replaceAllUsesWith(V);
-            PN->eraseFromParent();
-
-            Changed = true;
-          }
-        }
-      }
-    }
-  }
+  // ============================================================
+  // ORIGINALNI copyLoop
+  // ============================================================
 
   BasicBlock *copyLoop(
       Loop *L) {
@@ -404,36 +562,32 @@ struct OurLoopFissionPass : public LoopPass {
     BasicBlock *Exit =
         L->getExitBlock();
 
-    BasicBlock *Preheader =
-        L->getLoopPreheader();
-
-    BasicBlock *Header =
-        L->getHeader();
-
-    if (!Header) {
+    if (!Exit)
       return nullptr;
-    }
 
     vector<BasicBlock *>
         LoopBasicBlocksCopy;
 
-    ValueToValueMapTy VMap;
+    ValueToValueMapTy
+        VMap;
 
-    IRBuilder<> Builder(
-        Header->getContext());
+    IRBuilder<>
+        Builder(
+            Exit->getContext());
 
-    //
-    // Kreiranje kopija basic blokova
-    //
+    // ----------------------------------------------------------
+    // Kreiranje novih basic block-ova
+    // ----------------------------------------------------------
+
     for (BasicBlock *BB :
          LoopBasicBlocks) {
 
       BasicBlock *NewBB =
           BasicBlock::Create(
-              Header->getContext(),
+              Exit->getContext(),
               BB->getName() +
                   ".fission",
-              Header->getParent(),
+              Exit->getParent(),
               Exit);
 
       LoopBasicBlocksCopy.push_back(
@@ -443,9 +597,10 @@ struct OurLoopFissionPass : public LoopPass {
           NewBB;
     }
 
-    //
-    // Kloniranje instrukcija
-    //
+    // ----------------------------------------------------------
+    // Kopiranje instrukcija
+    // ----------------------------------------------------------
+
     for (size_t i = 0;
          i < LoopBasicBlocks.size();
          i++) {
@@ -473,9 +628,10 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    //
-    // Remap operand-a i successor-a
-    //
+    // ----------------------------------------------------------
+    // Remap
+    // ----------------------------------------------------------
+
     for (BasicBlock *BB :
          LoopBasicBlocksCopy) {
 
@@ -490,64 +646,55 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    //
-    // Ciscenje PHI cvorova
-    //
-    for (BasicBlock *NewBB :
-         LoopBasicBlocksCopy) {
+    // ----------------------------------------------------------
+    // Iz kopirane petlje brisemo prvi deo.
+    // ----------------------------------------------------------
 
-      for (Instruction &I :
-           *NewBB) {
+    unordered_set<BasicBlock *>
+        BlocksToDelete;
 
-        PHINode *PN =
-            dyn_cast<PHINode>(&I);
+    BasicBlock *BlockToStart =
+        findIfBasicBlock(
+            LoopBasicBlocksCopy,
+            true);
 
-        if (!PN) {
-          continue;
-        }
+    BasicBlock *BlockToStop =
+        findIfBasicBlock(
+            LoopBasicBlocksCopy,
+            false);
 
-        for (int i =
-                 static_cast<int>(
-                     PN->getNumIncomingValues()) - 1;
-             i >= 0;
-             i--) {
+    if (BlockToStart &&
+        BlockToStop) {
 
-          BasicBlock *IncB =
-              PN->getIncomingBlock(i);
+      deleteAllBlocksFrom(
+          BlockToStart,
+          BlockToStop,
+          BlocksToDelete);
 
-          bool Valid = false;
+      Instruction *HeaderTerm =
+          LoopBasicBlocksCopy
+              .front()
+              ->getTerminator();
 
-          for (BasicBlock *NB :
-               LoopBasicBlocksCopy) {
+      if (HeaderTerm &&
+          HeaderTerm->getNumSuccessors() >
+              0) {
 
-            if (IncB == NB) {
-              Valid = true;
-              break;
-            }
-          }
-
-          if (Preheader &&
-              IncB == Preheader) {
-
-            Valid = true;
-          }
-
-          if (!Valid) {
-
-            PN->removeIncomingValue(
-                i,
-                false);
-          }
-        }
+        HeaderTerm->setSuccessor(
+            0,
+            BlockToStop);
       }
-    }
 
-    if (LoopBasicBlocksCopy.empty()) {
-      return nullptr;
+      safeDeleteBlocks(
+          BlocksToDelete);
     }
 
     return LoopBasicBlocksCopy.front();
   }
+
+  // ============================================================
+  // ORIGINALNI loopFission
+  // ============================================================
 
   void loopFission(
       Loop *L) {
@@ -555,27 +702,28 @@ struct OurLoopFissionPass : public LoopPass {
     BasicBlock *LoopCopy =
         copyLoop(L);
 
-    if (!LoopCopy ||
-        LoopBasicBlocks.empty()) {
-      return;
-    }
+    if (LoopCopy &&
+        !LoopBasicBlocks.empty()) {
 
-    Instruction *Term =
-        LoopBasicBlocks.front()
-            ->getTerminator();
+      Instruction *Term =
+          LoopBasicBlocks
+              .front()
+              ->getTerminator();
 
-    if (!Term) {
-      return;
-    }
+      if (Term &&
+          Term->getNumSuccessors() >
+              1) {
 
-    if (Term->getNumSuccessors() >
-        1) {
-
-      Term->setSuccessor(
-          1,
-          LoopCopy);
+        Term->setSuccessor(
+            1,
+            LoopCopy);
+      }
     }
   }
+
+  // ============================================================
+  // runOnLoop
+  // ============================================================
 
   bool runOnLoop(
       Loop *L,
@@ -586,15 +734,8 @@ struct OurLoopFissionPass : public LoopPass {
         << L->getHeader()->getName()
         << "\n";
 
-    //
-    // OVO je ispravna linija.
-    //
     LoopBasicBlocks =
         L->getBlocksVector();
-
-    if (LoopBasicBlocks.empty()) {
-      return false;
-    }
 
     BasicBlock *FirstIf =
         findIfBasicBlock(
@@ -611,11 +752,17 @@ struct OurLoopFissionPass : public LoopPass {
         FirstIf == LastIf) {
 
       errs()
-          << "Nema najmanje dva if-a "
-          << "u petlji - fission se ne radi.\n";
+          << "[FISSION] Petlja nema dva dela "
+             "pogodna za razdvajanje.\n";
 
       return false;
     }
+
+    // ==========================================================
+    // NOVO:
+    //
+    // ANALIZA ZAVISNOSTI SE RADI PRE BILO KAKVE PROMENE CFG-a.
+    // ==========================================================
 
     DependenceInfo &DI =
         getAnalysis<
@@ -624,21 +771,31 @@ struct OurLoopFissionPass : public LoopPass {
 
     if (hasDependencies(
             L,
+            FirstIf,
+            LastIf,
             DI)) {
 
       errs()
-          << "Petlja se NE MOZE razdvojiti "
-          << "zbog postojanja zavisnosti "
-          << "podataka!\n";
+          << "[FISSION] Petlja se NE razdvaja "
+             "jer postoje zavisnosti izmedju delova.\n";
 
       return false;
     }
 
+    // ==========================================================
+    // Tek ako nema zavisnosti radimo originalni fission.
+    // ==========================================================
+
     errs()
-        << "Nema zabranjujucih zavisnosti. "
-        << "Pokrecem loop fission.\n";
+        << "[FISSION] Petlja moze da se razdvoji.\n";
 
     loopFission(L);
+
+    // ==========================================================
+    // ORIGINALNI KOD:
+    //
+    // Iz prve petlje uklanjamo drugi deo.
+    // ==========================================================
 
     BasicBlock *BranchBlock =
         findIfBasicBlock(
@@ -668,69 +825,37 @@ struct OurLoopFissionPass : public LoopPass {
                 TrueBB
                     ->getTerminator());
 
-        unordered_set<
-            BasicBlock *>
+        unordered_set<BasicBlock *>
             BlocksToDelete;
 
-        BasicBlock *Latch =
-            L->getLoopLatch();
+        deleteAllBlocksFrom(
+            NextIfOrJoinBB,
+            L->getLoopLatch(),
+            BlocksToDelete);
 
-        if (Latch) {
+        if (FirstBranch
+                ->getNumSuccessors() >
+            1) {
 
-          deleteAllBlocksFrom(
-              NextIfOrJoinBB,
-              Latch,
-              BlocksToDelete);
-
-          if (FirstBranch
-                  ->getNumSuccessors() >
-              1) {
-
-            FirstBranch
-                ->setSuccessor(
-                    1,
-                    Latch);
-          }
-
-          if (TrueBranch &&
-              TrueBranch
-                      ->getNumSuccessors() >
-                  0) {
-
-            TrueBranch
-                ->setSuccessor(
-                    0,
-                    Latch);
-          }
-
-          //
-          // Ne dozvoljavamo slucajno
-          // brisanje latch-a.
-          //
-          BlocksToDelete.erase(
-              Latch);
-
-          unlinkAndDeleteBlocks(
-              BlocksToDelete);
+          FirstBranch->setSuccessor(
+              1,
+              L->getLoopLatch());
         }
+
+        if (TrueBranch &&
+            TrueBranch
+                    ->getNumSuccessors() >
+                0) {
+
+          TrueBranch->setSuccessor(
+              0,
+              L->getLoopLatch());
+        }
+
+        safeDeleteBlocks(
+            BlocksToDelete);
       }
     }
-
-    Function *F =
-        L->getHeader()
-            ->getParent();
-
-    removeUnreachableBlocks(
-        *F);
-
-    cleanupFunctionPhis(
-        F);
-
-    removeUnreachableBlocks(
-        *F);
-
-    errs()
-        << "Loop fission zavrsen.\n";
 
     return true;
   }
@@ -742,6 +867,4 @@ char OurLoopFissionPass::ID = 0;
 
 static RegisterPass<OurLoopFissionPass> X(
     "Our-Loop-Fission-pass",
-    "Our Loop Fission Pass",
-    false,
-    false);
+    "Our Loop Fission Pass");

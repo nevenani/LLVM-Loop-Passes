@@ -32,7 +32,7 @@ struct OurLoopFissionPass : public LoopPass {
     AU.setPreservesCFG();
   }
 
-  // Funkcija za proveru zavisnosti pre razdvajanja (tvoja originalna logika)
+  // Funkcija za proveru zavisnosti pre razdvajanja
   bool hasDependencies(Loop *L, DependenceInfo &DI) {
     vector<Instruction*> MemoryInsts;
     vector<Instruction*> FirstPartInsts;
@@ -48,8 +48,7 @@ struct OurLoopFissionPass : public LoopPass {
         if (isa<LoadInst>(&I) || isa<StoreInst>(&I)) {
           MemoryInsts.push_back(&I);
         }
-        
-        // Preskačemo PHI čvorove petlje jer oni ne predstavljaju međusobnu zavisnost promenljivih
+
         if (isa<PHINode>(&I)) continue;
 
         if (inFirstPart) {
@@ -121,26 +120,13 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // DODOAVANJE VERIFIKACIJE PHI ČVOROVA: Sigurno uklanjanje blokova bez narušavanja SSA forme
+  // Sigurno brisanje blokova bez pucanja zbog PHI čvorova
   void safeDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
     for (BasicBlock *BB : BlocksToDelete) {
       if (!BB) continue;
       for (Instruction &I : *BB) {
         I.replaceAllUsesWith(UndefValue::get(I.getType()));
       }
-    }
-
-    for (BasicBlock *BB : BlocksToDelete) {
-      if (!BB) continue;
-      for (BasicBlock *Succ : successors(BB)) {
-        if (BlocksToDelete.find(Succ) == BlocksToDelete.end()) {
-          Succ->removePredecessor(BB, true);
-        }
-      }
-    }
-
-    for (BasicBlock *BB : BlocksToDelete) {
-      if (!BB) continue;
       BB->dropAllReferences();
     }
 
@@ -180,23 +166,6 @@ struct OurLoopFissionPass : public LoopPass {
     for (BasicBlock *BB : LoopBasicBlocksCopy) {
       for (Instruction &I : *BB) {
         RemapInstruction(&I, VMap, RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
-      }
-    }
-
-    // AŽURIRANJE PHI ČVOROVA U KLONIRANOJ PETLJI
-    for (BasicBlock *BB : LoopBasicBlocksCopy) {
-      for (Instruction &I : *BB) {
-        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
-          for (unsigned idx = 0; idx < PN->getNumIncomingValues(); ) {
-            BasicBlock *IncBB = PN->getIncomingBlock(idx);
-            if (VMap.count(IncBB)) {
-              PN->setIncomingBlock(idx, cast<BasicBlock>(VMap[IncBB]));
-              idx++;
-            } else {
-              PN->removeIncomingValue(idx, false);
-            }
-          }
-        }
       }
     }
 

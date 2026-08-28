@@ -3,6 +3,7 @@
 int main() {
     int x=3;
     int y=5;
+    int n=5;
     for (int i = 0; i < n; i++) {
     if (x > 0) {
         x++;

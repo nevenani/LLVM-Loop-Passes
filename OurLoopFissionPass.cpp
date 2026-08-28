@@ -12,6 +12,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Analysis/InstructionSimplify.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/Support/raw_ostream.h"
@@ -32,7 +33,6 @@ struct OurLoopFissionPass : public LoopPass {
     AU.setPreservesCFG();
   }
 
-  // Provera zavisnosti pre razdvajanja petlje
   bool hasDependencies(Loop *L, DependenceInfo &DI) {
     vector<Instruction*> MemoryInsts;
     vector<Instruction*> FirstPartInsts;
@@ -59,7 +59,6 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Provera memorijskih zavisnosti
     for (size_t i = 0; i < MemoryInsts.size(); i++) {
       for (size_t j = i + 1; j < MemoryInsts.size(); j++) {
         Instruction *InstA = MemoryInsts[i];
@@ -73,7 +72,6 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Provera direktnih SSA Def-Use zavisnosti
     for (Instruction *I1 : FirstPartInsts) {
       for (User *U : I1->users()) {
         if (Instruction *UI = dyn_cast<Instruction>(U)) {
@@ -120,11 +118,15 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  void safeDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
+  // Preusmeravanje terminatora pre brisanja blokova kako ne bismo ostavili "viseće" CFG grane
+  void unlinkAndDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
     for (BasicBlock *BB : BlocksToDelete) {
       if (!BB) continue;
-      for (Instruction &I : *BB) {
-        I.replaceAllUsesWith(UndefValue::get(I.getType()));
+      // Ukloni grane ka ovim blokovima iz PHI čvorova njihovih naslednika
+      for (BasicBlock *Succ : successors(BB)) {
+        if (BlocksToDelete.find(Succ) == BlocksToDelete.end()) {
+          Succ->removePredecessor(BB, true);
+        }
       }
       BB->dropAllReferences();
     }
@@ -136,41 +138,40 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Bezbedna popravka PHI čvorova i uklanjanje degenerisanih PHI-jeva (sa 0 ili 1 ulazom)
-  void fixPhisToMatchPreds(Function *F) {
+  // Bezbedno usklađivanje PHI ulaza i uprošćavanje degenerisanih PHI instrukcija
+  void cleanupFunctionPhis(Function *F) {
+    const DataLayout &DL = F->getParent()->getDataLayout();
+    
+    // 1. Prvo izbacujemo ulaze u PHI čvorovima koji više nisu stvarni CFG predhodnici
+    for (BasicBlock &BB : *F) {
+      unordered_set<BasicBlock*> RealPreds(pred_begin(&BB), pred_end(&BB));
+      for (Instruction &I : BB) {
+        if (PHINode *PN = dyn_cast<PHINode>(&I)) {
+          for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
+            if (RealPreds.find(PN->getIncomingBlock(i)) == RealPreds.end()) {
+              PN->removeIncomingValue(i, false);
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Prolaz za uprošćavanje PHI-jeva pomoću LLVM SimplifyInstruction
     bool changed = true;
     while (changed) {
       changed = false;
-
       for (BasicBlock &BB : *F) {
-        unordered_set<BasicBlock*> RealPreds(pred_begin(&BB), pred_end(&BB));
-
         for (auto It = BB.begin(), E = BB.end(); It != E; ) {
           Instruction &I = *It++;
           if (PHINode *PN = dyn_cast<PHINode>(&I)) {
-
-            // 1. Ukloni ulaze iz blokova koji više nisu pravi predhodnici
-            for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
-              BasicBlock *IncBB = PN->getIncomingBlock(i);
-              if (RealPreds.find(IncBB) == RealPreds.end()) {
-                PN->removeIncomingValue(i, false);
+            if (Value *V = SimplifyInstruction(PN, DL)) {
+              if (V != PN) {
+                PN->replaceAllUsesWith(V);
+                PN->eraseFromParent();
+                changed = true;
               }
-            }
-
-            // 2. Ako PHI nema nijedan ulaz, zameni sa Undef i obriši
-            if (PN->getNumIncomingValues() == 0) {
+            } else if (PN->getNumIncomingValues() == 0) {
               PN->replaceAllUsesWith(UndefValue::get(PN->getType()));
-              PN->eraseFromParent();
-              changed = true;
-            }
-            // 3. Ako PHI ima tačno 1 ulaz, zameni ga tom vrednošću i obriši
-            else if (PN->getNumIncomingValues() == 1) {
-              Value *SingleVal = PN->getIncomingValue(0);
-              if (SingleVal != PN) { // Izbegavanje kružne zavisnosti
-                PN->replaceAllUsesWith(SingleVal);
-              } else {
-                PN->replaceAllUsesWith(UndefValue::get(PN->getType()));
-              }
               PN->eraseFromParent();
               changed = true;
             }
@@ -224,7 +225,7 @@ struct OurLoopFissionPass : public LoopPass {
         HeaderTerm->setSuccessor(0, BlockToStop);
       }
 
-      safeDeleteBlocks(BlocksToDelete);
+      unlinkAndDeleteBlocks(BlocksToDelete);
     }
 
     return LoopBasicBlocksCopy.front();
@@ -278,19 +279,19 @@ struct OurLoopFissionPass : public LoopPass {
           TrueBranch->setSuccessor(0, L->getLoopLatch());
         }
 
-        safeDeleteBlocks(BlocksToDelete);
+        unlinkAndDeleteBlocks(BlocksToDelete);
       }
     }
 
     Function *F = L->getHeader()->getParent();
 
-    // 1. Uklanjamo nedostižne/odsečene blokove nastale transformacijom
+    // 1. Prvo očisti sve nedostižne blokove
     removeUnreachableBlocks(*F);
 
-    // 2. Usklađujemo PHI ulaze i eliminišemo PHI-jeve sa 0 ili 1 ulazom
-    fixPhisToMatchPreds(F);
+    // 2. Sredi PHI čvorove koristeći LLVM-ov SimplifyInstruction
+    cleanupFunctionPhis(F);
 
-    // 3. Još jedan prolaz za čišćenje blokova ako su PHI eliminacije oslobodile mrtve grane
+    // 3. Završno čišćenje blokova
     removeUnreachableBlocks(*F);
 
     return true;

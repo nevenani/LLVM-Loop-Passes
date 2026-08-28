@@ -19,5 +19,16 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake -DCMAKE_PREFIX_PATH=/usr/lib/llvm-14/cmake -DLLVM_DIR=/usr/lib/llvm-14/lib/cmake/llvm ..
+        cmake -DLLVM_DIR=/usr/lib/llvm-14/lib/cmake/llvm ..
         make
+
+    - name: Test Fission Pass
+      run: |
+        # 1. Prevođenje C test primera u LLVM IR (.ll)
+        clang-14 -S -emit-llvm -O0 -Xclang -disable-O0-optnone testForFission.c -o testForFission.ll
+
+        # 2. Pokretanje passa kroz mem2reg i opt alat
+        opt-14 -S -enable-new-pm=0 -mem2reg -load build/LLVMOurLoopFissionPass.so -our-loop-fission testForFission.ll -o output_fission.ll
+
+        # 3. Ispis transformisanog IR-a u logove Actions-a
+        cat output_fission.ll

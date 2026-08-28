@@ -120,16 +120,34 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Sigurno brisanje blokova bez pucanja zbog PHI čvorova
+  // POPRAVLJENO BRISANJE BLOKOVA: Prvo čistimo PHI ulaze kod suseda pa tek onda brišemo blok
   void safeDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
+    // 1. Zameniti sve upotrebe instrukcija sa undef
     for (BasicBlock *BB : BlocksToDelete) {
       if (!BB) continue;
       for (Instruction &I : *BB) {
         I.replaceAllUsesWith(UndefValue::get(I.getType()));
       }
+    }
+
+    // 2. Obavestiti sve susede (predecessors/successors) koji OSTAJU da je ovaj BB uklonjen
+    // Ovo automatski čisti PHI čvorove i sprečava <badref> greške
+    for (BasicBlock *BB : BlocksToDelete) {
+      if (!BB) continue;
+      for (BasicBlock *Succ : successors(BB)) {
+        if (BlocksToDelete.find(Succ) == BlocksToDelete.end()) {
+          Succ->removePredecessor(BB, true);
+        }
+      }
+    }
+
+    // 3. Otkazati sve reference unutar samog bloka
+    for (BasicBlock *BB : BlocksToDelete) {
+      if (!BB) continue;
       BB->dropAllReferences();
     }
 
+    // 4. Bezbedno izbrisati iz funkcije
     for (BasicBlock *BB : BlocksToDelete) {
       if (BB && BB->getParent()) {
         BB->eraseFromParent();

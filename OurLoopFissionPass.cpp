@@ -176,9 +176,8 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Sigurno kloniranje saignororisanjem nestalih lokalskih referenci i čišćenjem PHI-jeva u klonu
   BasicBlock *copyLoop(Loop *L) {
-    BasicBlock *Exit = L$getExitBlock(); // Malo prilagođeno
+    BasicBlock *Exit = L->getExitBlock();
     BasicBlock *Preheader = L->getLoopPreheader();
     BasicBlock *Header = L->getHeader();
     if (!Exit) Exit = L->getExitBlock();
@@ -212,14 +211,11 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // Čišćenje pokvarenih ulaza u PHI čvorovima unutar kloniranog bloka
     for (BasicBlock *NewBB : LoopBasicBlocksCopy) {
-      unordered_set<BasicBlock*> NewBBpreds(pred_begin(NewBB), pred_end(NewBB));
       for (Instruction &I : *NewBB) {
         if (PHINode *PN = dyn_cast<PHINode>(&I)) {
           for (int i = (int)PN->getNumIncomingValues() - 1; i >= 0; i--) {
             BasicBlock *IncB = PN->getIncomingBlock(i);
-            // Ako ulazni blok nije u novom kloniranom skupu niti je preheader, ukloni ga
             bool valid = false;
             for (BasicBlock *NB : LoopBasicBlocksCopy) {
               if (IncB == NB) valid = true;
@@ -249,6 +245,8 @@ struct OurLoopFissionPass : public LoopPass {
 
   bool runOnLoop(Loop *L, LPPassManager &LPM) override {
     errs() << "Procesiram petlju: " << L->getHeader()->getName() << "\n";
+    LoopBasicBlocks = L$getBlocksVector(); // Čekaj, da i ovde budem siguran da je tačka, mada je u kodu tačno -> ali evo provere
+
     LoopBasicBlocks = L->getBlocksVector();
 
     BasicBlock *FirstIf = findIfBasicBlock(LoopBasicBlocks, true);
@@ -279,7 +277,7 @@ struct OurLoopFissionPass : public LoopPass {
         deleteAllBlocksFrom(NextIfOrJoinBB, L->getLoopLatch(), BlocksToDelete);
         
         if (FirstBranch->getNumSuccessors() > 1) {
-          FirstBranch$setSuccessor(1, L->getLoopLatch()); // Mala sintaksna ispravka dole
+          FirstBranch->setSuccessor(1, L->getLoopLatch());
         }
         if (TrueBranch && TrueBranch->getNumSuccessors() > 0) {
           TrueBranch->setSuccessor(0, L->getLoopLatch());

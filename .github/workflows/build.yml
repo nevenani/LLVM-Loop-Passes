@@ -24,7 +24,7 @@ jobs:
 
       - name: Test Fission Pass
         run: |
-          clang-14 -S -emit-llvm -O0 -Xclang -disable-O0-optnone testForFission.c -o testForFission.ll
-          opt-14 -enable-new-pm=0 -load build/LLVMOurLoopFissionPass.so -Our-Loop-Fission-pass -S testForFission.ll -o output_fission.ll
+          clang-14 -S -emit-llvm -O0 -Xclang -disable-O0-optnone antitestForFission.c -o antitestForFission.ll
+          opt-14 -enable-new-pm=0 -load build/LLVMOurLoopFissionPass.so -Our-Loop-Fission-pass -S antitestForFission.ll -o output_fission.ll
           cat output_fission.ll
         

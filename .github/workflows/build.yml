@@ -19,5 +19,5 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake -DLLVM_DIR=/usr/lib/llvm-14/cmake ..
+        cmake -DCMAKE_PREFIX_PATH=/usr/lib/llvm-14/cmake -DLLVM_DIR=/usr/lib/llvm-14/lib/cmake/llvm ..
         make

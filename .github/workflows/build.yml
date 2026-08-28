@@ -4,20 +4,20 @@ on: [push, pull_request]
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
 
-    - name: Install LLVM and Clang
+    - name: Install LLVM 14 and Clang
       run: |
         sudo apt-get update
-        sudo apt-get install -y llvm-10 llvm-10-dev clang-10 cmake
+        sudo apt-get install -y llvm-14 llvm-14-dev clang-14 cmake
 
     - name: Build Project
       run: |
         mkdir build
         cd build
-        cmake -DLLVM_DIR=/usr/lib/llvm-10/cmake ..
+        cmake -DLLVM_DIR=/usr/lib/llvm-14/cmake ..
         make

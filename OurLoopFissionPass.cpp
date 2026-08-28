@@ -118,11 +118,9 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Preusmeravanje terminatora pre brisanja blokova kako ne bismo ostavili "viseće" CFG grane
   void unlinkAndDeleteBlocks(const unordered_set<BasicBlock*> &BlocksToDelete) {
     for (BasicBlock *BB : BlocksToDelete) {
       if (!BB) continue;
-      // Ukloni grane ka ovim blokovima iz PHI čvorova njihovih naslednika
       for (BasicBlock *Succ : successors(BB)) {
         if (BlocksToDelete.find(Succ) == BlocksToDelete.end()) {
           Succ->removePredecessor(BB, true);
@@ -138,11 +136,9 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
-  // Bezbedno usklađivanje PHI ulaza i uprošćavanje degenerisanih PHI instrukcija
   void cleanupFunctionPhis(Function *F) {
     const DataLayout &DL = F->getParent()->getDataLayout();
     
-    // 1. Prvo izbacujemo ulaze u PHI čvorovima koji više nisu stvarni CFG predhodnici
     for (BasicBlock &BB : *F) {
       unordered_set<BasicBlock*> RealPreds(pred_begin(&BB), pred_end(&BB));
       for (Instruction &I : BB) {
@@ -156,7 +152,6 @@ struct OurLoopFissionPass : public LoopPass {
       }
     }
 
-    // 2. Prolaz za uprošćavanje PHI-jeva pomoću LLVM SimplifyInstruction
     bool changed = true;
     while (changed) {
       changed = false;
@@ -181,6 +176,7 @@ struct OurLoopFissionPass : public LoopPass {
     }
   }
 
+  // Bezbedno kloniranje cele petlje bez agresivnog brisanja u toku mapiranja
   BasicBlock *copyLoop(Loop *L) {
     BasicBlock *Exit = L->getExitBlock();
     if (!Exit) return nullptr;
@@ -211,21 +207,6 @@ struct OurLoopFissionPass : public LoopPass {
       for (Instruction &I : *BB) {
         RemapInstruction(&I, VMap, RF_NoModuleLevelChanges | RF_IgnoreMissingLocals);
       }
-    }
-
-    unordered_set<BasicBlock*> BlocksToDelete;
-    BasicBlock *BlockToStart = findIfBasicBlock(LoopBasicBlocksCopy, true);
-    BasicBlock *BlockToStop = findIfBasicBlock(LoopBasicBlocksCopy, false);
-
-    if (BlockToStart && BlockToStop) {
-      deleteAllBlocksFrom(BlockToStart, BlockToStop, BlocksToDelete);
-
-      Instruction *HeaderTerm = LoopBasicBlocksCopy.front()->getTerminator();
-      if (HeaderTerm && HeaderTerm->getNumSuccessors() > 0) {
-        HeaderTerm->setSuccessor(0, BlockToStop);
-      }
-
-      unlinkAndDeleteBlocks(BlocksToDelete);
     }
 
     return LoopBasicBlocksCopy.front();
@@ -285,13 +266,8 @@ struct OurLoopFissionPass : public LoopPass {
 
     Function *F = L->getHeader()->getParent();
 
-    // 1. Prvo očisti sve nedostižne blokove
     removeUnreachableBlocks(*F);
-
-    // 2. Sredi PHI čvorove koristeći LLVM-ov SimplifyInstruction
     cleanupFunctionPhis(F);
-
-    // 3. Završno čišćenje blokova
     removeUnreachableBlocks(*F);
 
     return true;

@@ -288,8 +288,6 @@ struct OurLoopFusionPass : public LoopPass {
     
       BranchInst *ExitBranch = dyn_cast<BranchInst>(Header1->getTerminator());
       if(ExitBranch == nullptr){
-        // Ako terminator zaglavlja nije direktan Branch, tražimo uslovni skok u bloku uslova
-        // (u zavisnosti od strukture, obično je u header-u ili uslovnom bloku)
       }
 
       for(BasicBlock *Pred : predecessors(Exit1)){

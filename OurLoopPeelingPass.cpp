@@ -188,6 +188,40 @@ struct OurLoopPeelingPass : public LoopPass {
         LoopBasicBlocks = L->getBlocks();
         findLoopCounterAndBound(L);
 
+        unsigned PeelingCount = getPeelingCount();
+        if (PeelingCount == 0 || !LoopBound)
+            return false;
+
+        int64_t LoopIterations = -1;
+
+        
+        if (ConstantInt *BoundCI = dyn_cast<ConstantInt>(LoopBound)) {
+            LoopIterations = BoundCI->getZExtValue();
+        } 
+        
+        else {
+            Value *Ptr = LoopBound;
+            Function *F = L->getHeader()->getParent();
+            
+            for (BasicBlock &BB : *F) {
+                for (Instruction &I : BB) {
+                    if (StoreInst *SI = dyn_cast<StoreInst>(&I)) {
+                        if (SI->getPointerOperand() == Ptr) {
+                            if (ConstantInt *CI = dyn_cast<ConstantInt>(SI->getValueOperand())) {
+                                LoopIterations = CI->getZExtValue();
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (LoopIterations != -1) break;
+            }
+        }
+
+        
+        if (LoopIterations != -1 && (unsigned)LoopIterations < PeelingCount) {
+            return false;
+        }
 
         peeling(L);
 

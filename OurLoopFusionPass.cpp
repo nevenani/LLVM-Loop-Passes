@@ -10,14 +10,21 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/IR/CFG.h"
 
+#include<vector>
+#include<unordered_map>
+
 using namespace llvm;
+
+
 
 namespace {
 struct OurLoopFusionPass : public LoopPass {
   std::vector<BasicBlock *> LoopBasicBlocks;
   std::unordered_map<Value *, Value *> VariablesMap;
-  Value *LoopCounter, *LoopBound;
-  int BoundValue;
+  Value *LoopCounter = nullptr, *LoopBound = nullptr;
+  int BoundValue = 0;
+
+
   static char ID;
   OurLoopFusionPass() : LoopPass(ID) {}
 
@@ -31,6 +38,7 @@ struct OurLoopFusionPass : public LoopPass {
       }
     }
   }
+  
   void findLoopCounterAndBound(Loop *L){
     for(Instruction &I : *L->getHeader()){
       if(isa<ICmpInst>(&I)){
@@ -62,18 +70,23 @@ struct OurLoopFusionPass : public LoopPass {
   }
 
   BasicBlock *findNextLoopHeader(Loop *L) {
+    // 1. Pronađemo izlazni blok trenutne petlje
     BasicBlock *ExitBlock = L->getExitBlock();
     if (ExitBlock == nullptr)
       return nullptr;
 
-      Instruction *EndInstruction = ExitBlock->getTerminator();
+    // 2. Uzmemo terminator izlaznog bloka
+    Instruction *EndInstruction = ExitBlock->getTerminator();
     if (EndInstruction == nullptr)
       return nullptr;
 
+    // 3. Vidimo na koji blok on bezuslovno skace
     if (auto *Branch = dyn_cast<BranchInst>(EndInstruction)) {
       if (Branch->isUnconditional()) {
         BasicBlock *NextBlock = Branch->getSuccessor(0);
         
+        // Sledeći blok je zaglavlje druge petlje ako ima oblik petlje 
+        // (tj. ako se vraća nazad ili ima uslovnu granu na kraju koja liči na petlju)
         if (NextBlock != nullptr && !NextBlock->empty()) {
           return NextBlock;
         }
@@ -87,13 +100,13 @@ struct OurLoopFusionPass : public LoopPass {
 
       Value *Counter1 = LoopCounter;
       Value *Bound1 = LoopBound;
-      int SavedBoundValue1 = BoundValue; 
+      int SavedBoundValue1 = BoundValue; // Sačuvamo granicu prve petlje
 
       findLoopCounterAndBoundForHeader(Header2);
 
       Value *Counter2 = LoopCounter;
       Value *Bound2 = LoopBound;
-      int SavedBoundValue2 = BoundValue;
+      int SavedBoundValue2 = BoundValue; // Sačuvamo granicu druge petlje
 
       if(Counter1 == nullptr || Bound1 == nullptr)
         return false;
@@ -102,6 +115,67 @@ struct OurLoopFusionPass : public LoopPass {
         return false;
 
       return (Bound1 == Bound2) || (SavedBoundValue1 == SavedBoundValue2);
+    }
+
+    bool HasDependency(BasicBlock *BodyOfLoop1, BasicBlock *BodyOfLoop2){
+
+      for(Instruction &I1 : *BodyOfLoop1){
+
+        Value *Var1 = nullptr;
+        bool IsRead1 = false;
+        bool IsWrite1 = false;
+
+        if(LoadInst *Load = dyn_cast<LoadInst>(&I1)){
+          Var1 = Load->getPointerOperand();
+          IsRead1 = true;
+        }
+        else if(StoreInst *Store = dyn_cast<StoreInst>(&I1)){
+          Var1 = Store->getPointerOperand();
+          IsWrite1 = true;
+        }
+
+        if(Var1 == nullptr)
+          continue;
+
+        for(Instruction &I2 : *BodyOfLoop2){
+          
+          Value *Var2 = nullptr;
+          bool IsRead2 = false;
+          bool IsWrite2 = false;
+
+          if(LoadInst *Load = dyn_cast<LoadInst>(&I2)){
+            Var2 = Load->getPointerOperand();
+            IsRead2 = true;
+          }
+          else if(StoreInst *Store = dyn_cast<StoreInst>(&I2)){
+            Var2 = Store->getPointerOperand();
+            IsWrite2 = true;
+          }
+          
+          if(Var2 == nullptr)
+            continue;
+        
+
+          if(Var1 != Var2)
+            continue;
+
+          if(IsWrite1 && IsRead2){
+            errs() << "Detektovali smo RAW zavisnost";
+            return true;
+          }
+
+          if(IsRead1 && IsWrite2){
+            errs() << "Detektovali smo WAR zavisnost";
+            return true;
+          }
+
+          if(IsWrite1 && IsWrite2){
+            errs() << "Detektovali smo WAW zavisnost";
+            return true;
+          }
+        }
+      }
+      return false;
     }
 
     void fusionLoop(Loop *L1, BasicBlock *Header2){
@@ -136,6 +210,11 @@ struct OurLoopFusionPass : public LoopPass {
 
       if(BodyOfLoop1 == nullptr || BodyOfLoop2 == nullptr)
         return;
+
+      if(HasDependency(BodyOfLoop1, BodyOfLoop2)){
+        errs() << "Loop fusion ne moze da se izvrsi\n";
+        return;
+      }
 
       StoreInst *init = nullptr;
       for(Instruction &I : *Exit1){
@@ -230,6 +309,8 @@ struct OurLoopFusionPass : public LoopPass {
           }
         }
       }
+
+      
       Function *F = Header1->getParent();
       EliminateUnreachableBlocks(*F);
     }

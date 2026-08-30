@@ -15,15 +15,12 @@
 
 using namespace llvm;
 
-
-
 namespace {
 struct OurLoopFusionPass : public LoopPass {
   std::vector<BasicBlock *> LoopBasicBlocks;
   std::unordered_map<Value *, Value *> VariablesMap;
   Value *LoopCounter = nullptr, *LoopBound = nullptr;
   int BoundValue = 0;
-
 
   static char ID;
   OurLoopFusionPass() : LoopPass(ID) {}
@@ -70,23 +67,18 @@ struct OurLoopFusionPass : public LoopPass {
   }
 
   BasicBlock *findNextLoopHeader(Loop *L) {
-    // 1. Pronađemo izlazni blok trenutne petlje
     BasicBlock *ExitBlock = L->getExitBlock();
     if (ExitBlock == nullptr)
       return nullptr;
 
-    // 2. Uzmemo terminator izlaznog bloka
     Instruction *EndInstruction = ExitBlock->getTerminator();
     if (EndInstruction == nullptr)
       return nullptr;
 
-    // 3. Vidimo na koji blok on bezuslovno skace
     if (auto *Branch = dyn_cast<BranchInst>(EndInstruction)) {
       if (Branch->isUnconditional()) {
         BasicBlock *NextBlock = Branch->getSuccessor(0);
-        
-        // Sledeći blok je zaglavlje druge petlje ako ima oblik petlje 
-        // (tj. ako se vraća nazad ili ima uslovnu granu na kraju koja liči na petlju)
+
         if (NextBlock != nullptr && !NextBlock->empty()) {
           return NextBlock;
         }
@@ -100,13 +92,13 @@ struct OurLoopFusionPass : public LoopPass {
 
       Value *Counter1 = LoopCounter;
       Value *Bound1 = LoopBound;
-      int SavedBoundValue1 = BoundValue; // Sačuvamo granicu prve petlje
+      int SavedBoundValue1 = BoundValue; 
 
       findLoopCounterAndBoundForHeader(Header2);
 
       Value *Counter2 = LoopCounter;
       Value *Bound2 = LoopBound;
-      int SavedBoundValue2 = BoundValue; // Sačuvamo granicu druge petlje
+      int SavedBoundValue2 = BoundValue; 
 
       if(Counter1 == nullptr || Bound1 == nullptr)
         return false;
